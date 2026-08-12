@@ -1,0 +1,55 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ESP-IDF prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget flex bison gperf python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+      - name: Clone ESP-IDF (v5.4 for ESP32-C5 support)
+        run: |
+          mkdir -p $HOME/esp
+          cd $HOME/esp
+          git clone --depth 1 --branch v5.4 https://github.com/espressif/esp-idf.git
+          cd esp-idf
+          git submodule update --init --checkout --depth 1
+          ./install.sh esp32c5
+
+      - name: Build project
+        run: |
+          source $HOME/esp/esp-idf/export.sh
+          idf.py --preview set-target esp32c5
+          idf.py --preview build
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32c5
+          path: |
+            build/*.bin
+            build/*.elf
+            build/bootloader/*.bin
+            build/partition_table/*.bin
+          retention-days: 30
