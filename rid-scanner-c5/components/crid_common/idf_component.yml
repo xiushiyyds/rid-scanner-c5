@@ -1,0 +1,3 @@
+dependencies:
+  espressif/cjson: "^1.7.19"
+  espressif/opendroneid: ">=1.1.0"
