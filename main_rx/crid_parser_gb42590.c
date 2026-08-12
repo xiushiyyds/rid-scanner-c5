@@ -12,7 +12,7 @@
 #include "crid_json.h"
 #include "crid_rx_types.h"
 
-static const char *TAG = "RID_GB42590";
+/* 本模块使用 crid_parser_common.c 中的统一 TAG "RID_PARSE" 进行日志输出 */
 
 /* ================================================================
  * 常量与宏定义

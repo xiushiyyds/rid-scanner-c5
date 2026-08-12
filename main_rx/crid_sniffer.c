@@ -190,7 +190,8 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         msg.oui_type = 0xFF;  // DJI 特殊标记
                         msg.has_vendor_ie = true;
                         
-                        uint16_t copy_len = dji_len < 256 ? dji_len : 255;
+                        /* dji_len 是 uint8_t，最大 255，msg.data[256] 可完整容纳 */
+                        uint16_t copy_len = dji_len;
                         memcpy(msg.data, dji_payload, copy_len);
                         msg.data_len = copy_len;
                         

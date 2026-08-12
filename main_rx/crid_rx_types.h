@@ -17,7 +17,7 @@
  * ================================================================ */
 #define CRID_VERSION_MAJOR     1
 #define CRID_VERSION_MINOR     9
-#define CRID_VERSION_PATCH     4
+#define CRID_VERSION_PATCH     6
 
 
 /* ================================================================

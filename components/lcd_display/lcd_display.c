@@ -31,6 +31,11 @@
 #include "esp_timer.h"
 #include "driver/i2c.h"
 
+/* sniffer 锁定信道（与 crid_sniffer.c 中 FIXED_CHANNEL 一致） */
+#ifndef FIXED_CHANNEL
+#define FIXED_CHANNEL 6
+#endif
+
 static const char *TAG = "lcd_display";
 
 /* ================================================================
@@ -655,9 +660,10 @@ static void render_detail_page(void)
     y += LINE_H + 2;
 
     /* 首次/最后出现 */
-    if (s_tracker[idx].first_seen_ms > 0) {
+    if (s_tracker[idx].last_seen_ms > 0) {
+        /* [Bug FF 修复] 使用 last_seen 显示"多久前见过"，而非 first_seen(追踪时长) */
         snprintf(buf, sizeof(buf), "Seen: %lus ago",
-                 (unsigned long)((uint32_t)(esp_timer_get_time() / 1000 - s_tracker[idx].first_seen_ms) / 1000));
+                 (unsigned long)((uint32_t)(esp_timer_get_time() / 1000 - s_tracker[idx].last_seen_ms) / 1000));
         fb_draw_string(2, y, buf, COLOR_GRAY);
         y += LINE_H + 2;
     }
@@ -802,14 +808,14 @@ static void render_pair_overlay(void);
 static void refresh_task(void *arg)
 {
     static uint32_t frame_count = 0;
-    static int wifi_channel = 6;
 
     while (1) {
         /* 清屏 */
         fb_fill(COLOR_BLACK);
 
-        /* 获取扫描计数 */
+        /* 获取扫描计数和当前 WiFi 信道 */
         uint32_t scan_count = 0;
+        int wifi_channel = 1;
         if (s_tracker && s_tracker_mutex) {
             xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
             for (int i = 0; i < s_max_uavs; i++) {
@@ -817,6 +823,8 @@ static void refresh_task(void *arg)
             }
             xSemaphoreGive(s_tracker_mutex);
         }
+        /* [Bug EE 修复] sniffer 锁定信道使用 FIXED_CHANNEL，不再硬编码 */
+        wifi_channel = FIXED_CHANNEL;
 
         /* 渲染状态栏 */
         render_status_bar(scan_count, wifi_channel);
@@ -893,22 +901,24 @@ static void refresh_task(void *arg)
  * ================================================================ */
 static void button_poll_task(void *arg)
 {
-    static uint32_t last_btn_time = 0;
+    /* [Bug GG 修复] 两个按键使用独立的时间戳，避免按一个键后另一个键被屏蔽 300ms */
+    static uint32_t last_user_time = 0;
+    static uint32_t last_boot_time = 0;
     const uint32_t debounce_ms = 300;
 
     while (1) {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
         /* User 按键（GPIO0）= 下一页 */
-        if (gpio_get_level(BTN_USER_PIN) == 0 && (now - last_btn_time > debounce_ms)) {
+        if (gpio_get_level(BTN_USER_PIN) == 0 && (now - last_user_time > debounce_ms)) {
             lcd_display_send_key(LCD_KEY_NEXT);
-            last_btn_time = now;
+            last_user_time = now;
         }
 
         /* Boot 按键（GPIO28）= 选择/确认 */
-        if (gpio_get_level(BTN_BOOT_PIN) == 0 && (now - last_btn_time > debounce_ms)) {
+        if (gpio_get_level(BTN_BOOT_PIN) == 0 && (now - last_boot_time > debounce_ms)) {
             lcd_display_send_key(LCD_KEY_SELECT);
-            last_btn_time = now;
+            last_boot_time = now;
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));

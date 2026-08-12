@@ -41,7 +41,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.4"
+#define CRID_VERSION_STRING "1.9.6"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -462,8 +462,27 @@ static void parser_task(void *pvParameter) {
                 existing->operator_id = uav->operator_id;
                 existing->gb46750 = uav->gb46750;
                 existing->last_pack = uav->last_pack;
-                existing->is_dji = uav->is_dji;
-                existing->dji_type = uav->dji_type;
+                /* [Bug DD 修复] 跨信道合并时保留 DJI 标记：
+                 * 如果已有条目是 DJI 无人机（先从 WiFi DroneID 收到），
+                 * 不要被后续 BLE 标准 RID 条目的 is_dji=false 覆盖；
+                 * 同时 DJI 私有字段只在新条目确实携带 DJI 数据时才更新。 */
+                if (uav->is_dji) {
+                    existing->is_dji   = true;
+                    existing->dji_type = uav->dji_type;
+                }
+                if (uav->dji_model_code) {
+                    existing->dji_model_code = uav->dji_model_code;
+                }
+                if (uav->dji_serial[0]) {
+                    strncpy(existing->dji_serial, uav->dji_serial,
+                            sizeof(existing->dji_serial) - 1);
+                    existing->dji_serial[sizeof(existing->dji_serial) - 1] = '\0';
+                }
+                if (uav->dji_model[0]) {
+                    strncpy(existing->dji_model, uav->dji_model,
+                            sizeof(existing->dji_model) - 1);
+                    existing->dji_model[sizeof(existing->dji_model) - 1] = '\0';
+                }
                 // 将当前 MAC 条目标记为非活跃（释放槽位）
                 uav->active = false;
                 uav->msg_count = 0;
