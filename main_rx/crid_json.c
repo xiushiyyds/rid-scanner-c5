@@ -670,7 +670,7 @@ void json_uav_update(const uav_track_t *uav) {
                        "\"speed_h\":%.1f,\"speed_v\":%.1f,\"heading\":%.1f,"
                        "\"pilot_lat\":%.6f,\"pilot_lon\":%.6f",
                    uav->dji_latitude, uav->dji_longitude, uav->dji_altitude,
-                   uav->location.height, uav->dji_speed_h, uav->dji_speed_v,
+                   uav->dji_height, uav->dji_speed_h, uav->dji_speed_v,
                    uav->dji_heading,
                    uav->dji_pilot_lat, uav->dji_pilot_lon);
         } else if (uav->dji_type == 0x11) {

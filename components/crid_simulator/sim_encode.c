@@ -101,7 +101,10 @@ void sim_encode_location(const sim_encode_config_t *cfg, uint8_t *message) {
     }
     message[2] = track_angle;
     message[3] = encode_ground_speed(cfg->speed_horizontal);
-    message[4] = (uint8_t)(cfg->speed_vertical * 2.0f);
+    /* 垂直速度：ASTM 编码 = speed / 0.5 (int8_t)，decodeSpeedVertical 返回 enc * 0.5。
+     * 旧代码 *2 导致解码结果是实际值的 4 倍。 */
+    int8_t vs_enc = (int8_t)(cfg->speed_vertical / 0.5f);
+    message[4] = (uint8_t)vs_enc;
 
     write_le32_u32(&message[5], (uint32_t)(int32_t)round(cfg->latitude * 1e7));
     write_le32_u32(&message[9], (uint32_t)(int32_t)round(cfg->longitude * 1e7));
@@ -140,19 +143,29 @@ void sim_encode_system(const sim_encode_config_t *cfg, uint8_t *message) {
     write_le32(&message[2], (int32_t)round(cfg->operator_lat * 1e7));
     write_le32(&message[6], (int32_t)round(cfg->operator_lon * 1e7));
 
-    write_le16(&message[10], 1);
-    message[12] = 0x64;
+    write_le16(&message[10], 1);  /* AreaCount = 1 */
+    /* AreaRadius: ASTM 编码 = radius_m / 10 (单位 10m)。
+     * 100m 半径应编码为 10 (0x0A)，之前写 0x64(100) 会被解码为 1000m。 */
+    message[12] = 10;
 
+    /* AreaCeiling(2B) + AreaFloor(2B)：ASTM 高度编码 (alt+1000)*2 */
     write_le16(&message[13], encode_altitude(100.0f));
     write_le16(&message[15], encode_altitude(50.0f));
 
+    /* Byte 17: [ClassEU:4][CategoryEU:4] */
     message[17] = (cfg->class_eu << 4) | (cfg->category_eu & 0x0F);
+
+    /* OperatorAltitudeGeo(2B, byte 18-19)：ASTM 高度编码 */
     write_le16(&message[18], encode_altitude(cfg->operator_alt));
 
+    /* Timestamp(4B, byte 20-23)：自 2019-01-01 00:00:00 UTC 的秒数 */
     struct timeval tv_sys;
     gettimeofday(&tv_sys, NULL);
     uint32_t ts_since_2019 = (uint32_t)(tv_sys.tv_sec - 1546300800);
     write_le32_u32(&message[20], ts_since_2019);
+
+    /* Byte 24: Reserved */
+    message[24] = 0;
 
     ESP_LOGD(TAG, "System built");
 }

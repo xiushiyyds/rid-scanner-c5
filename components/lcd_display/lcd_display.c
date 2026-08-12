@@ -657,7 +657,7 @@ static void render_detail_page(void)
     /* 首次/最后出现 */
     if (s_tracker[idx].first_seen_ms > 0) {
         snprintf(buf, sizeof(buf), "Seen: %lus ago",
-                 (unsigned long)((esp_timer_get_time() / 1000 - s_tracker[idx].first_seen_ms) / 1000));
+                 (unsigned long)((uint32_t)(esp_timer_get_time() / 1000 - s_tracker[idx].first_seen_ms) / 1000));
         fb_draw_string(2, y, buf, COLOR_GRAY);
         y += LINE_H + 2;
     }

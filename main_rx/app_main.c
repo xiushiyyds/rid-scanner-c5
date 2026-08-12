@@ -41,7 +41,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.2"
+#define CRID_VERSION_STRING "1.9.4"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -330,6 +330,7 @@ static void parser_task(void *pvParameter) {
                 uav->dji_latitude = dji_data.latitude;
                 uav->dji_longitude = dji_data.longitude;
                 uav->dji_altitude = dji_data.altitude;
+                uav->dji_height = dji_data.height;
                 uav->dji_speed_h = dji_data.speed_h;
                 uav->dji_speed_v = dji_data.speed_up;
                 uav->dji_heading = dji_data.heading;

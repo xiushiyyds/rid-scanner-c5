@@ -17,7 +17,7 @@
  * ================================================================ */
 #define CRID_VERSION_MAJOR     1
 #define CRID_VERSION_MINOR     9
-#define CRID_VERSION_PATCH     0
+#define CRID_VERSION_PATCH     4
 
 
 /* ================================================================
@@ -373,6 +373,7 @@ typedef struct {
     double            dji_latitude;           // DJI 纬度
     double            dji_longitude;          // DJI 经度
     float             dji_altitude;           // DJI 高度 (m)
+    float             dji_height;             // DJI 相对起飞点高度 (m)
     float             dji_speed_h;            // DJI 水平速度 (m/s)
     float             dji_speed_v;            // DJI 垂直速度 (m/s)
     float             dji_heading;            // DJI 航向 (度)

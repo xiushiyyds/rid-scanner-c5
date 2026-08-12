@@ -112,6 +112,10 @@ rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t
     hex_dump(TAG, "Beacon Payload HEX", data, len);
     #endif
 
+    /* 每次解码前重置 UAS_Data，避免旧消息的 Valid 标志和字段残留
+     * 导致 extract_layered 读到上一帧的过期数据。 */
+    odid_initUasData(&uav->uas_data);
+
     /* --- 第一轮：尝试各协议解析 --- */
 
     // 尝试解析 GB 46750 协议
@@ -170,7 +174,11 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         if (gb->has_unique_id) {
             uav->basic_id.valid = true;
             uav->basic_id.id_type = ODID_IDTYPE_SERIAL_NUMBER;
-            uav->basic_id.ua_type = gb->has_ua_category ? gb->ua_category : ODID_UATYPE_HELICOPTER_OR_MULTIROTOR;
+            /* GB46750 ua_category 是中国重量分类(微型/轻型/小型/中型/大型)，
+             * 与 ASTM UA Type(机型结构)是不同维度枚举，不能直接赋值。
+             * 消费级无人机绝大多数为多旋翼，默认 HELICOPTER_OR_MULTIROTOR。
+             * 原始分类值保留在 gb46750.ua_category 字段中。 */
+            uav->basic_id.ua_type = ODID_UATYPE_HELICOPTER_OR_MULTIROTOR;
 
             // 字符串安全净化
             char *dst = uav->basic_id.uas_id;
@@ -200,7 +208,7 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         EXTRACT_IF(gb->has_v_accuracy,        uav->location.v_accuracy, gb->v_accuracy);
         EXTRACT_IF(gb->has_speed_accuracy,    uav->location.speed_accuracy, gb->speed_accuracy);
         EXTRACT_IF(gb->has_ts_accuracy,       uav->location.ts_accuracy, gb->ts_accuracy);
-        EXTRACT_IF(gb->has_timestamp,         uav->location.timestamp, gb->timestamp_ms / 1000.0f);
+        EXTRACT_IF(gb->has_timestamp,         uav->location.timestamp, gb->timestamp_ms / 100.0f);
 
         if (gb->has_uav_location || gb->has_geo_altitude || gb->has_baro_altitude ||
             gb->has_ground_speed || gb->has_track_angle || gb->has_operation_status) {

@@ -129,12 +129,10 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         break;
                     }
 
-                    // 调用 OpenDroneID 库解码
-                    ODID_UAS_Data uas_data;
-                    memset(&uas_data, 0, sizeof(uas_data));
-                    int decode_ret = decodeMessagePack(&uas_data, (ODID_MessagePack_encoded *)odid_payload);
-
-                    if (decode_ret >= 0) {
+                    // 不在 ISR 中做解码（decodeMessagePack 计算量大，
+                    //  memset + 解码耗时可能超过看门狗限制），
+                    //  直接投递原始 payload 到队列，由 parser_task 解码。
+                    {
                         sniffer_msg_t msg;
                         memset(&msg, 0, sizeof(msg));
 
@@ -162,7 +160,6 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         }
                         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
                     }
-                    // 解码失败不统计，避免干扰
                     break;  // 一个帧只应有一个 RID IE
                 } else if (IS_DJI_OUI(oui0, oui1, oui2)) {
                     // DJI DroneID 私有协议检测
@@ -173,11 +170,11 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         break;
                     }
                     
-                    // DJI payload: 跳过 IE ID(1) + Len(1) + OUI(3) = 5 字节
+                    // DJI payload: 跳过 IE ID(1) + Len(1) + OUI(3) + OUI_Type(1) = 6 字节
                     // payload 从 common header (0x58,0x62,0x13) 开始
-                    uint8_t *dji_payload = &ie_ptr[i + 5];
-                    // 有效数据长度 = IE Len - OUI(3)
-                    uint8_t dji_len = len - 3;
+                    uint8_t *dji_payload = &ie_ptr[i + 6];
+                    // 有效数据长度 = IE Len - OUI(3) - OUI_Type(1)
+                    uint8_t dji_len = len - 4;
                     
                     if (dji_len >= 4) {  // 至少 common header(3) + subcommand(1)
                         sniffer_msg_t msg;
@@ -350,8 +347,12 @@ esp_err_t crid_sniffer_init(void) {
 }
 
 void crid_sniffer_start_channel_hold(void) {
+    static TaskHandle_t s_hold_task = NULL;
+    if (s_hold_task != NULL) {
+        return;  /* 已启动，避免重复创建任务 */
+    }
     xTaskCreate(channel_hold_task, "ch_hold",
-                CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, NULL);
+                CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, &s_hold_task);
 }
 
 /**
