@@ -233,6 +233,7 @@ static int init_lcd(void)
         .dc_gpio_num = LCD_PIN_DC,
         .cs_gpio_num = LCD_PIN_CS,
         .pclk_hz = LCD_SPI_FREQ_HZ,
+        .spi_mode = 0,
         .trans_queue_depth = 10,
         .on_color_trans_done = NULL,
         .lcd_cmd_bits = 8,
@@ -955,6 +956,13 @@ int lcd_display_init(void)
 
     /* 初始化背光 */
     init_backlight();
+
+    /* 开机纯色填充测试：确认 SPI 链路和 ST7789 初始化正常 */
+    for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
+        s_fb[i] = rgb565(0, 30, 60);  // 深蓝色
+    }
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
+    ESP_LOGI(TAG, "开机纯色测试已发送 (深蓝)");
 
     /* 初始化按键（User + Boot 两个物理按键） */
     gpio_config_t btn_user_cfg = {
