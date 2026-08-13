@@ -53,7 +53,7 @@ extern "C" {
 #define BTN_BOOT_PIN        28      // Boot 按键（低有效）
 
 /* 电源管理 I2C（AXP2602，与触摸共用 I2C 总线） */
-#define AXP2602_I2C_ADDR    0x34
+#define AXP2602_I2C_ADDR    0x62    // 7位地址（8位写地址 0xC4）
 #define AXP2602_INT_PIN     10
 
 /* ================================================================
