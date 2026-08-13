@@ -210,22 +210,25 @@ static int parse_telemetry(const uint8_t *record, uint16_t rec_len,
             break;
     }
 
-    /* 经纬度：s32 LE / 174533.0 */
+    /* 经纬度：s32 LE / 174533.0
+     * 参照系：record 已跳过 common header(3) + subcommand(1)，从 version 开始。
+     * 与 DroneSecurity duml 布局的对应关系为 record[x] = duml[x+2]。
+     * 真机样本（Mavic Air 2 / Mini 2，CRC 通过）验证：
+     *   serial 16 字节位于 record[5..20]，故 longitude 从 record[21] 开始。 */
     int32_t raw_lon = rd_s32le(&record[21]);
     int32_t raw_lat = rd_s32le(&record[25]);
     data->longitude = (double)raw_lon / DJI_COORD_SCALE;
     data->latitude  = (double)raw_lat / DJI_COORD_SCALE;
 
-    /* 高度：s16 LE
-     * 注意：DroneSecurity 解码时 /3.281 (英尺→米)，
-     * 但 DJIDroneIDspoofer 直接 pack_uint16(altitude_meters)。
-     * 不同固件版本可能不同，暂按米处理，真机验证后调整。 */
-    int16_t alt = rd_s16le(&record[29]);
-    int16_t hgt = rd_s16le(&record[31]);
-    data->altitude = (float)alt;
-    data->height   = (float)hgt;
+    /* 高度：u16 LE，单位为英尺，需 /3.281 转米。
+     * 真机样本 Mavic Air 2: 原始 height=42ft, altitude=141ft → 12.8m / 42.97m，
+     * 与实际悬停高度吻合。此前版本误按米处理，真机验证确认空口单位为英尺。 */
+    uint16_t alt = rd_u16le(&record[29]);
+    uint16_t hgt = rd_u16le(&record[31]);
+    data->altitude = (float)alt / 3.281f;
+    data->height   = (float)hgt / 3.281f;
 
-    /* 速度：s16 LE, cm/s → m/s */
+    /* 速度：s16 LE，单位 cm/s → m/s */
     int16_t v_north = rd_s16le(&record[33]);
     int16_t v_east  = rd_s16le(&record[35]);
     int16_t v_up    = rd_s16le(&record[37]);
@@ -236,72 +239,66 @@ static int parse_telemetry(const uint8_t *record, uint16_t rec_len,
                               data->speed_east * data->speed_east);
 
     /*
-     * 姿态角（以 DJIDroneIDspoofer 编码顺序为准）：
-     *   record[39..40] = yaw:   (deg - 180) * 100
-     *   record[41..42] = roll:  deg * 100
-     *   record[43..44] = pitch: deg * 100
-     *
-     * KSY 写的顺序是 pitch/roll/yaw，但 spoofer 实际编码是 yaw/roll/pitch。
-     * DroneSecurity 只提取 d_1_angle（第一个，即 yaw）。
+     * 航向角（真机布局，DroneSecurity 校验）：
+     *   record[39..40] = d_1_angle (航向)
+     * 真实 OcuSync 空口只广播一个姿态角（航向）。
+     * 换算：DroneSecurity 仅取原始值；anarkiwi 解码器: yaw(rad)=raw/100/57.296，
+     * 即 yaw(度) = raw/100。spoofer 里 roll/pitch 三字段为其私有扩展，标准帧不存在。
      */
-    int16_t raw_yaw   = rd_s16le(&record[39]);
-    int16_t raw_roll  = rd_s16le(&record[41]);
-    int16_t raw_pitch = rd_s16le(&record[43]);
-
-    /* yaw: raw = (deg - 180) * 100, 还原: deg = raw/100 + 180 */
-    float yaw = (float)raw_yaw / 100.0f + 180.0f;
-    if (yaw >= 360.0f) yaw -= 360.0f;
-    if (yaw < 0.0f)    yaw += 360.0f;
-    data->heading = yaw;
-
-    data->roll  = (float)raw_roll / 100.0f;
-    data->pitch = (float)raw_pitch / 100.0f;
+    int16_t raw_angle = rd_s16le(&record[39]);
+    float yaw_deg = (float)raw_angle / 100.0f;   /* 原始值单位为 0.01 度 */
+    while (yaw_deg < 0.0f)    yaw_deg += 360.0f;
+    while (yaw_deg >= 360.0f) yaw_deg -= 360.0f;
+    data->heading = yaw_deg;
+    data->roll  = 0.0f;
+    data->pitch = 0.0f;
 
     /*
-     * 判断是否包含 pilot GPS 块（16 字节）：
-     *   完整格式 record >= 70 字节（到 product_type + uuid_len）
-     *   短格式 record 54 字节（到 product_type）
+     * 完整格式（record 视角，真机样本验证）：
+     *   [41..48] phone_app_gps_time (u64, ms)
+     *   [49..52] app_lat  (s32, 飞手/手机纬度)
+     *   [53..56] app_lon  (s32, 飞手/手机经度)
+     *   [57..60] home_lon (s32)
+     *   [61..64] home_lat (s32)
+     *   [65]     product_type (u8)
+     *   [66]     uuid_len (u8)
+     *   [67..86] uuid (20s)
+     *   [87..88] crc (u16)
+     * （对应 DroneSecurity duml 偏移 +2）
      *
-     * 完整格式在 attitude 之后：
-     *   [45..52] phone_app_gps_time (u64)
-     *   [53..56] pilot_lat (s32)
-     *   [57..60] pilot_lon (s32)
-     *   [61..64] home_lon (s32)
-     *   [65..68] home_lat (s32)
-     *   [69]     product_type
-     *   [70]     uuid_len
-     *   [71..90] uuid (20)
+     * 短格式（54 字节 record）：无 pilot GPS 块。
      */
-    if (rec_len >= 70) {
+    if (rec_len >= 87) {
         /* 完整格式：含 pilot GPS */
         data->has_pilot_gps = true;
 
-        /* phone_app_gps_time 在 record[45..52]，暂不使用 */
-        (void)rd_u64le(&record[45]);
+        /* phone_app_gps_time (u64, ms epoch) */
+        data->gps_time_ms = rd_u64le(&record[41]);
 
-        int32_t pilot_lat = rd_s32le(&record[53]);
-        int32_t pilot_lon = rd_s32le(&record[57]);
+        int32_t pilot_lat = rd_s32le(&record[49]);
+        int32_t pilot_lon = rd_s32le(&record[53]);
         data->pilot_latitude  = (double)pilot_lat / DJI_COORD_SCALE;
         data->pilot_longitude = (double)pilot_lon / DJI_COORD_SCALE;
 
-        int32_t raw_home_lon = rd_s32le(&record[61]);
-        int32_t raw_home_lat = rd_s32le(&record[65]);
+        int32_t raw_home_lon = rd_s32le(&record[57]);
+        int32_t raw_home_lat = rd_s32le(&record[61]);
         data->home_longitude = (double)raw_home_lon / DJI_COORD_SCALE;
         data->home_latitude  = (double)raw_home_lat / DJI_COORD_SCALE;
 
-        data->product_type = record[69];
+        data->product_type = record[65];
     } else {
-        /* 短格式：无 pilot GPS */
+        /* 短格式：无 pilot GPS 块 */
         data->has_pilot_gps = false;
+        data->gps_time_ms = rd_u64le(&record[41]);
         data->pilot_latitude  = 0.0;
         data->pilot_longitude = 0.0;
 
-        int32_t raw_home_lon = rd_s32le(&record[45]);
-        int32_t raw_home_lat = rd_s32le(&record[49]);
+        int32_t raw_home_lon = rd_s32le(&record[49]);
+        int32_t raw_home_lat = rd_s32le(&record[53]);
         data->home_longitude = (double)raw_home_lon / DJI_COORD_SCALE;
         data->home_latitude  = (double)raw_home_lat / DJI_COORD_SCALE;
 
-        data->product_type = record[53];
+        data->product_type = record[57];
     }
 
     strncpy(data->model_name, dji_product_type_name(data->product_type),

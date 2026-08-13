@@ -79,7 +79,7 @@ extern "C" {
  *   完整格式：common_header(3) + subcommand(1) + record(87) = 91 字节
  * ================================================================ */
 #define DJI_TELEMETRY_MIN_LEN  54   /* record 最小长度 */
-#define DJI_TELEMETRY_FULL_LEN 87   /* record 完整长度（含 pilot GPS） */
+#define DJI_TELEMETRY_FULL_LEN 87   /* record 完整长度（含 pilot GPS + uuid，到 CRC 前；真机验证） */
 #define DJI_FLIGHT_INFO_MIN_LEN 28
 
 /* ================================================================
@@ -114,6 +114,7 @@ typedef struct {
     double   home_latitude;      // 返航点纬度
     double   home_longitude;     // 返航点经度
     bool     has_pilot_gps;      // 是否包含操作员 GPS 数据
+    uint64_t gps_time_ms;        // 手机/飞控 GPS 时间戳 (ms epoch)
 
     // Flight Purpose (subcommand 0x11)
     char     drone_id[11];       // 无人机 ID (10字节 ASCII)
