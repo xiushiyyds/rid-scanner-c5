@@ -30,6 +30,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/i2c.h"
+#include "driver/ledc.h"
 
 /* sniffer 锁定信道（与 crid_sniffer.c 中 FIXED_CHANNEL 一致） */
 #ifndef FIXED_CHANNEL
@@ -239,22 +240,22 @@ static int init_lcd(void)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io_handle));
 
-    /* 配置 ST7789 驱动 */
+    /* 配置 ST7789 驱动 — reset_gpio_num=-1 因为上面已手动复位 */
     esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = LCD_PIN_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .reset_gpio_num = -1,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .data_endian = LCD_RGB_DATA_ENDIAN_LITTLE,
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_cfg, &s_panel));
 
-    /* 初始化并配置屏幕 */
-    esp_lcd_panel_reset(s_panel);
+    /* 初始化并配置屏幕（参数参照 LILYGO factory.ino 官方示例） */
     esp_lcd_panel_init(s_panel);
-    esp_lcd_panel_mirror(s_panel, false, false);
+    esp_lcd_panel_mirror(s_panel, true, false);
+    esp_lcd_panel_swap_xy(s_panel, true);
+    esp_lcd_panel_invert_color(s_panel, true);
+    esp_lcd_panel_set_gap(s_panel, 0, 35);
     esp_lcd_panel_disp_on_off(s_panel, true);
-
-    /* T-Display-C5 屏幕偏移量（170x320 在 240x320 驱动中） */
-    /* ST7789 原生 240x320, T-Display-C5 使用其中 170x320 区域 */
 
     ESP_LOGI(TAG, "LCD 初始化完成: %dx%d", LCD_WIDTH, LCD_HEIGHT);
     return 0;
@@ -265,16 +266,27 @@ static int init_lcd(void)
  * ================================================================ */
 static void init_backlight(void)
 {
-    gpio_config_t bk_cfg = {
-        .pin_bit_mask = (1ULL << LCD_PIN_BK),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    /* LEDC PWM 背光（参照 LILYGO factory.ino：5kHz, 8-bit, 最大亮度） */
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 5000,
+        .clk_cfg = LEDC_AUTO_CLK,
     };
-    gpio_config(&bk_cfg);
-    gpio_set_level(LCD_PIN_BK, 1);  // 开启背光
-    ESP_LOGI(TAG, "背光开启 (GPIO%d)", LCD_PIN_BK);
+    ESP_ERROR_CHECK(ledc_timer_config(&timer_cfg));
+
+    ledc_channel_config_t ch_cfg = {
+        .gpio_num = LCD_PIN_BK,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 255,
+        .hpoint = 0,
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ch_cfg));
+    ESP_LOGI(TAG, "背光开启 (GPIO%d, PWM 255)", LCD_PIN_BK);
 }
 
 /* ================================================================
