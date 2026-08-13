@@ -294,14 +294,12 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    /* 优先分配在 PSRAM 中（T-Display-C5 有 8MB PSRAM） */
-    s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM);
+    /* SPI DMA 要求 framebuffer 在内部 DMA-capable SRAM 且 cache-aligned。
+       PSRAM 不能直接用于 SPI DMA 传输，会导致 tx_color 失败。 */
+    s_fb = heap_caps_aligned_alloc(64, LCD_FB_SIZE,
+                                   MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!s_fb) {
-        ESP_LOGW(TAG, "PSRAM 分配失败，尝试内部 SRAM");
-        s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA);
-    }
-    if (!s_fb) {
-        ESP_LOGE(TAG, "帧缓冲分配失败！需要 %d bytes", LCD_FB_SIZE);
+        ESP_LOGE(TAG, "帧缓冲分配失败！需要 %d bytes DMA-capable SRAM", LCD_FB_SIZE);
         return -1;
     }
     memset(s_fb, 0, LCD_FB_SIZE);
