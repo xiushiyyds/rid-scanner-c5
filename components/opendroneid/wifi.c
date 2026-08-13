@@ -172,7 +172,7 @@ void drone_export_gps_data(ODID_UAS_Data *UAS_Data, char *buf, size_t buf_size)
     mprintf("\t\t\t\"AuthType\": %d,\n", UAS_Data->Auth[0].AuthType);
     mprintf("\t\t\t\"LastPageIndex\": %d,\n", UAS_Data->Auth[0].LastPageIndex);
     mprintf("\t\t\t\"Length\": %d,\n", UAS_Data->Auth[0].Length);
-    mprintf("\t\t\t\"Timestamp\": %u,\n", UAS_Data->Auth[0].Timestamp);
+    mprintf("\t\t\t\"Timestamp\": %u,\n", (unsigned int) UAS_Data->Auth[0].Timestamp);
     for (int i = 0; i <= UAS_Data->Auth[0].LastPageIndex; i++) {
         mprintf("\t\t\t\"AuthData Page %d,\": %s\n", i, UAS_Data->Auth[i].AuthData);
     }

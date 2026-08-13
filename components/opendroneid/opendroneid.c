@@ -1407,7 +1407,7 @@ void printAuth_data(ODID_Auth_data *Auth)
             "AuthType: %d\nDataPage: %d\nLastPageIndex: %d\nLength: %d\n"\
             "Timestamp: %u\nAuthData: ";
         printf(ODID_Auth_data_format, Auth->AuthType, Auth->DataPage,
-               Auth->LastPageIndex, Auth->Length, Auth->Timestamp);
+               Auth->LastPageIndex, Auth->Length, (unsigned int) Auth->Timestamp);
         for (int i = 0; i < ODID_AUTH_PAGE_ZERO_DATA_SIZE; i++)
             printf("0x%02X ", Auth->AuthData[i]);
     } else {
@@ -1452,7 +1452,7 @@ void printSystem_data(ODID_System_data *System_data)
         System_data->AreaCount, System_data->AreaRadius,
         (double) System_data->AreaCeiling, (double) System_data->AreaFloor,
         System_data->CategoryEU, System_data->ClassEU,
-        (double) System_data->OperatorAltitudeGeo, System_data->Timestamp);
+        (double) System_data->OperatorAltitudeGeo, (unsigned int) System_data->Timestamp);
 }
 
 /**
