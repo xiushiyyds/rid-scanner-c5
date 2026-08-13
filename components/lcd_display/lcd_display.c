@@ -328,19 +328,15 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
-/* 安全的帧缓冲推送：内部 SRAM 一次发完，PSRAM 分块发（避免 DMA underflow）。
-   每块 20 行 = 170*20*2 = 6800 字节，在 SPI bounce buffer 安全范围内。 */
+/* 安全的帧缓冲推送：一律小分块刷新，避免大块 DMA 传输后半段数据丢失。
+   每块 10 行 = 170*10*2 = 3400 字节，远低于 SPI DMA 单描述符上限。
+   实测全屏 108KB 一次性 DMA 传输在 ESP32-C5 上约 60% 后数据出错（雪花），
+   LVGL 官方示例也是 partial render 小块刷新，此处保持一致策略。 */
 static void flush_framebuffer(void)
 {
     if (!s_panel || !s_fb) return;
 
-    if (!s_fb_in_psram) {
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
-        return;
-    }
-
-    /* PSRAM 路径：分块刷新，每块 20 行 */
-    const int chunk_rows = 20;
+    const int chunk_rows = 10;
     for (int y = 0; y < LCD_HEIGHT; y += chunk_rows) {
         int h = chunk_rows;
         if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
