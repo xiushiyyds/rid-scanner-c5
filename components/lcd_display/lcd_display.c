@@ -294,12 +294,16 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    /* SPI DMA 要求 framebuffer 在内部 DMA-capable SRAM 且 cache-aligned。
-       PSRAM 不能直接用于 SPI DMA 传输，会导致 tx_color 失败。 */
-    s_fb = heap_caps_aligned_alloc(64, LCD_FB_SIZE,
-                                   MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    /* 与 LILYGO factory.ino 官方一致：PSRAM + DMA capability。
+       IDF v5.5 支持 PSRAM DMA，必须同时带 MALLOC_CAP_DMA 和 MALLOC_CAP_8BIT。 */
+    s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     if (!s_fb) {
-        ESP_LOGE(TAG, "帧缓冲分配失败！需要 %d bytes DMA-capable SRAM", LCD_FB_SIZE);
+        ESP_LOGW(TAG, "PSRAM DMA 分配失败，尝试内部 SRAM");
+        s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    }
+    if (!s_fb) {
+        ESP_LOGE(TAG, "帧缓冲分配失败！需要 %d bytes", LCD_FB_SIZE);
         return -1;
     }
     memset(s_fb, 0, LCD_FB_SIZE);
