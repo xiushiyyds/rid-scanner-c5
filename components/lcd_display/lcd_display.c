@@ -31,6 +31,7 @@
 #include "esp_timer.h"
 #include "driver/i2c.h"
 #include "driver/ledc.h"
+#include "esp_cache.h"
 
 /* sniffer 锁定信道（与 crid_sniffer.c 中 FIXED_CHANNEL 一致） */
 #ifndef FIXED_CHANNEL
@@ -211,7 +212,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_FB_SIZE + 8,
+        .max_transfer_sz = 170 * 10 * 2 + 8,  /* 单块 10 行 RGB565 + 余量，避免 bounce buffer 过大 */
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -296,20 +297,20 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    /* 关键：LILYGO lcd.ino 测试代码用纯内部 SRAM (MALLOC_CAP_DMA) 可正常刷屏。
-       一次性从 PSRAM DMA 发送 108KB 在 WiFi/BT 共存时会导致 DMA underflow/花屏
-       (参考 IDF issue #18764)。因此优先内部 SRAM，PSRAM fallback 时走分块刷新。 */
-    s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    /* 与 LILYGO factory.ino 保持一致：PSRAM | DMA | 8BIT。
+       PSRAM 配合分块刷新 (10行/块) + esp_cache_msync，避免 DMA 读到 cache 脏数据。
+       内部 SRAM 108KB 会挤占 WiFi/BT 协议栈，可能导致共存不稳定，因此仅作 fallback。 */
+    s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
     if (s_fb) {
-        s_fb_in_psram = false;
-        ESP_LOGI(TAG, "帧缓冲在内部 SRAM: %d bytes @ %p", LCD_FB_SIZE, s_fb);
+        s_fb_in_psram = true;
+        ESP_LOGI(TAG, "帧缓冲在 PSRAM: %d bytes @ %p（分块刷新模式）", LCD_FB_SIZE, s_fb);
     } else {
-        ESP_LOGW(TAG, "内部 SRAM 不足，尝试 PSRAM（将使用分块刷新）");
-        s_fb = heap_caps_malloc(LCD_FB_SIZE,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+        ESP_LOGW(TAG, "PSRAM 分配失败，尝试内部 SRAM");
+        s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
         if (s_fb) {
-            s_fb_in_psram = true;
-            ESP_LOGI(TAG, "帧缓冲在 PSRAM: %d bytes @ %p（分块刷新模式）", LCD_FB_SIZE, s_fb);
+            s_fb_in_psram = false;
+            ESP_LOGI(TAG, "帧缓冲在内部 SRAM: %d bytes @ %p", LCD_FB_SIZE, s_fb);
         }
     }
     if (!s_fb) {
@@ -328,10 +329,9 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
-/* 安全的帧缓冲推送：一律小分块刷新，避免大块 DMA 传输后半段数据丢失。
-   每块 10 行 = 170*10*2 = 3400 字节，远低于 SPI DMA 单描述符上限。
-   实测全屏 108KB 一次性 DMA 传输在 ESP32-C5 上约 60% 后数据出错（雪花），
-   LVGL 官方示例也是 partial render 小块刷新，此处保持一致策略。 */
+/* 安全的帧缓冲推送：分块刷新，每块 10 行 = 3400 字节。
+   实测全屏一次性 DMA 传输在 ESP32-C5 上约 60% 后数据出错（雪花），
+   分块可避免 SPI DMA 描述符链过长、cache 未同步等问题。 */
 static void flush_framebuffer(void)
 {
     if (!s_panel || !s_fb) return;
@@ -340,8 +340,13 @@ static void flush_framebuffer(void)
     for (int y = 0; y < LCD_HEIGHT; y += chunk_rows) {
         int h = chunk_rows;
         if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h,
-                                  &s_fb[y * LCD_WIDTH]);
+        uint16_t *p = &s_fb[y * LCD_WIDTH];
+        size_t len = LCD_WIDTH * h * sizeof(uint16_t);
+        /* PSRAM 上的数据要先做 cache 写回，DMA 才能读到最新内容 */
+        if (s_fb_in_psram) {
+            esp_cache_msync(p, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        }
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h, p);
     }
 }
 
