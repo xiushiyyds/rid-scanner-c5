@@ -3,7 +3,7 @@
  *
  * 硬件目标：LILYGO T-Display-C5
  *   - 1.9" ST7789, 170×320, SPI
- *   - 帧缓冲 108,800 bytes, 放 PSRAM
+ *   - 帧缓冲 108,800 bytes, 优先内部 SRAM（PSRAM 时分块刷新）
  *   - 5fps 刷新 (200ms)
  *
  * 屏幕布局（170×320 竖屏）：
@@ -54,7 +54,8 @@ void lcd_display_set_sim_info(const sim_display_info_t *info) {
  * 内部状态
  * ================================================================ */
 static esp_lcd_panel_handle_t s_panel = NULL;
-static uint16_t *s_fb = NULL;          // 帧缓冲（PSRAM）
+static uint16_t *s_fb = NULL;          // 帧缓冲
+static bool s_fb_in_psram = false;     // 帧缓冲是否在 PSRAM（决定刷新策略）
 static TaskHandle_t s_refresh_task = NULL;
 static QueueHandle_t s_key_queue = NULL;
 
@@ -210,7 +211,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_FB_SIZE,
+        .max_transfer_sz = LCD_FB_SIZE + 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -238,6 +239,9 @@ static int init_lcd(void)
         .on_color_trans_done = NULL,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .flags = {
+            .psram_dma_direct = false,  /* 禁用 PSRAM 直连 DMA，让驱动用 bounce buffer */
+        },
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io_handle));
 
@@ -295,20 +299,27 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    /* 与 LILYGO factory.ino 官方一致：PSRAM + DMA capability。
-       IDF v5.5 支持 PSRAM DMA，必须同时带 MALLOC_CAP_DMA 和 MALLOC_CAP_8BIT。 */
-    s_fb = heap_caps_malloc(LCD_FB_SIZE,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!s_fb) {
-        ESP_LOGW(TAG, "PSRAM DMA 分配失败，尝试内部 SRAM");
-        s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    /* 关键：LILYGO lcd.ino 测试代码用纯内部 SRAM (MALLOC_CAP_DMA) 可正常刷屏。
+       一次性从 PSRAM DMA 发送 108KB 在 WiFi/BT 共存时会导致 DMA underflow/花屏
+       (参考 IDF issue #18764)。因此优先内部 SRAM，PSRAM fallback 时走分块刷新。 */
+    s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (s_fb) {
+        s_fb_in_psram = false;
+        ESP_LOGI(TAG, "帧缓冲在内部 SRAM: %d bytes @ %p", LCD_FB_SIZE, s_fb);
+    } else {
+        ESP_LOGW(TAG, "内部 SRAM 不足，尝试 PSRAM（将使用分块刷新）");
+        s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+        if (s_fb) {
+            s_fb_in_psram = true;
+            ESP_LOGI(TAG, "帧缓冲在 PSRAM: %d bytes @ %p（分块刷新模式）", LCD_FB_SIZE, s_fb);
+        }
     }
     if (!s_fb) {
         ESP_LOGE(TAG, "帧缓冲分配失败！需要 %d bytes", LCD_FB_SIZE);
         return -1;
     }
     memset(s_fb, 0, LCD_FB_SIZE);
-    ESP_LOGI(TAG, "帧缓冲分配成功: %d bytes @ %p", LCD_FB_SIZE, s_fb);
     return 0;
 }
 
@@ -318,6 +329,27 @@ static int init_framebuffer(void)
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+/* 安全的帧缓冲推送：内部 SRAM 一次发完，PSRAM 分块发（避免 DMA underflow）。
+   每块 20 行 = 170*20*2 = 6800 字节，在 SPI bounce buffer 安全范围内。 */
+static void flush_framebuffer(void)
+{
+    if (!s_panel || !s_fb) return;
+
+    if (!s_fb_in_psram) {
+        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
+        return;
+    }
+
+    /* PSRAM 路径：分块刷新，每块 20 行 */
+    const int chunk_rows = 20;
+    for (int y = 0; y < LCD_HEIGHT; y += chunk_rows) {
+        int h = chunk_rows;
+        if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h,
+                                  &s_fb[y * LCD_WIDTH]);
+    }
 }
 
 static void fb_fill(uint16_t color)
@@ -867,7 +899,7 @@ static void refresh_task(void *arg)
 
         /* 推送到屏幕 */
         render_pair_overlay();
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
+        flush_framebuffer();
 
         frame_count++;
 
@@ -961,8 +993,8 @@ int lcd_display_init(void)
     for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) {
         s_fb[i] = rgb565(0, 30, 60);  // 深蓝色
     }
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
-    ESP_LOGI(TAG, "开机纯色测试已发送 (深蓝)");
+    flush_framebuffer();
+    ESP_LOGI(TAG, "开机纯色测试已发送 (深蓝, fb_in_psram=%d)", s_fb_in_psram);
 
     /* 初始化按键（User + Boot 两个物理按键） */
     gpio_config_t btn_user_cfg = {
