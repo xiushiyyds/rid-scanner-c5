@@ -239,9 +239,6 @@ static int init_lcd(void)
         .on_color_trans_done = NULL,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
-        .flags = {
-            .psram_dma_direct = false,  /* 禁用 PSRAM 直连 DMA，让驱动用 bounce buffer */
-        },
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io_handle));
 
