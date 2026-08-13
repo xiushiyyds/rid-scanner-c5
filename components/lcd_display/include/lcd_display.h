@@ -61,7 +61,7 @@ extern "C" {
  * ================================================================ */
 #define LCD_WIDTH            170
 #define LCD_HEIGHT           320
-#define LCD_SPI_FREQ_HZ     (20 * 1000 * 1000)  // 20MHz SPI (ST7789 max reliable ~27MHz)
+#define LCD_SPI_FREQ_HZ     (10 * 1000 * 1000)  // 10MHz SPI (安全稳定，排除时序问题)
 
 /* 帧缓冲大小：170×320×2 = 108,800 bytes ≈ 106KB */
 #define LCD_FB_SIZE         (LCD_WIDTH * LCD_HEIGHT * 2)
