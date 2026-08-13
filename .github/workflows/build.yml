@@ -28,11 +28,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git wget flex bison gperf python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
 
-      - name: Clone ESP-IDF (v5.4)
+      - name: Clone ESP-IDF (v5.5.2)
         run: |
           mkdir -p $HOME/esp
           cd $HOME/esp
-          git clone --depth 1 --branch v5.4 https://github.com/espressif/esp-idf.git
+          git clone --depth 1 --branch v5.5.2 https://github.com/espressif/esp-idf.git
           cd esp-idf
           git submodule update --init --checkout --depth 1
           ./install.sh esp32c5
@@ -40,8 +40,8 @@ jobs:
       - name: Build project
         run: |
           source $HOME/esp/esp-idf/export.sh
-          idf.py --preview set-target esp32c5
-          idf.py --preview build
+          idf.py set-target esp32c5
+          idf.py build
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
