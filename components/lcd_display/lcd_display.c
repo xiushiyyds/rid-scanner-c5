@@ -99,7 +99,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 170 * 40 * 2 + 8,
+        .max_transfer_sz = LCD_WIDTH * 20 * 2 + 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -122,7 +122,7 @@ static int init_lcd(void)
         .cs_gpio_num = LCD_PIN_CS,
         .pclk_hz = LCD_SPI_FREQ_HZ,
         .spi_mode = 0,
-        .trans_queue_depth = 1,   /* 必须为1：bounce buffer 只有一块，等上一块 DMA 完成才能 memcpy 下一块 */
+        .trans_queue_depth = 10,  /* on_color_trans_done=NULL 时 draw_bitmap 阻塞等DMA完成，bounce buffer可安全复用 */
         .on_color_trans_done = NULL,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
