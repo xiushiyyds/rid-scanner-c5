@@ -611,7 +611,7 @@ static void monitor_task(void *pvParameter) {
  * 这些回调在 NimBLE host task 上下文中被调用。
  * WiFi init/start/deinit 可能阻塞数百毫秒，直接在 host task 里
  * 同步执行会导致 NimBLE 协议栈看门狗超时或 GATT 通知失败，
- * 表现为网页显示"未连接"。
+ * 表现为网页显示未连接。
  * 改为投递到独立的 mode_switch_task，host task 立即返回。
  * ================================================================ */
 
@@ -753,9 +753,9 @@ static void lcd_sim_update_task(void *arg) {
  * GPS 自身位置上报任务
  * lcdfix17: 无论有没有 GPS 硬件，每3秒都通过BLE发送 SELF_GPS 状态。
  * 有定位：SELF_GPS:lat,lon,alt,sats
- * 无定位/无硬件：SELF_GPS:0,0,0,0  （网页据此显示"等待定位"）
+ * 无定位/无硬件：SELF_GPS:0,0,0,0  （网页据此显示等待定位）
  * 之前只在 valid 时发送，没接 GPS 模块时网页完全收不到状态，
- * 用户无法区分是"没连上"还是"没定位"。
+ * 用户无法区分是没连上还是没定位。
  * ================================================================ */
 static void gps_report_task(void *arg) {
     char buf[96];

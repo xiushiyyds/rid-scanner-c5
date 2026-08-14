@@ -173,7 +173,7 @@ int lcd_display_get_battery_voltage(uint16_t *voltage_mv);
 /**
  * lcdfix16: GPS 状态提供回调。
  *
- * lcd_display 是独立 component，不能直接 #include "gps_module.h"
+ * lcd_display 是独立 component，不能直接 include gps_module.h
  * （那会造成 main_rx ↔ lcd_display 组件循环依赖）。
  * 由 app_main 注册一个轻量回调，LCD 需要绘制状态栏时调用它拿 GPS 快照。
  * 返回 true 表示有有效定位，false 表示无定位/未接模块。

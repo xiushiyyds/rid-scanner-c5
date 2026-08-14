@@ -47,6 +47,9 @@ def extract_ui_chars():
             continue
         with open(src_path, encoding='utf-8') as f:
             src = f.read()
+        # Strip C/C++ comments first (comments may contain quotes that break regex)
+        src = re.sub(r'/\*.*?\*/', '', src, flags=re.DOTALL)
+        src = re.sub(r'//[^\n]*', '', src)
         for m in re.finditer(r'"([^"]*)"', src):
             for c in m.group(1):
                 cp = ord(c)

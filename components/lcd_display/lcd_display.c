@@ -5,10 +5,10 @@
  *   - DMA 传输完成信号量同步（on_color_trans_done），消除撕裂/杂线
  *   - LCD 初始化必须在 WiFi/BLE 之前，保证 108KB 内部 SRAM 可用
  *   - 修复列表 UAS ID / 详情 MAC 溢出截断
- *   - 字库补 "准"、几何符号区(●○★→等)
+ *   - 字库补准字、几何符号区(●○★→等)
  *   - 详情页布局重排，信息完整显示
  *
- * 硬件：LILYGO T-Display-C5 (1.9" ST7789, 170×320, RGB565, SPI)
+ * 硬件：LILYGO T-Display-C5 (1.9寸 ST7789, 170×320, RGB565, SPI)
  * 字体：16×16 CJK + 8×16 ASCII 混合排版
  */
 
@@ -99,7 +99,7 @@ void lcd_display_register_sim_callbacks(sim_action_cb_t start,
     s_sim_mode_cb = cycle_mode;
 }
 
-/* lcdfix17: 取消自动熄屏。用户明确要求"只要开关机"，
+/* lcdfix17: 取消自动熄屏。用户明确要求只要开关机，
  * 60秒自动熄屏在户外使用时经常误判，且唤醒死锁bug已修但
  * 自动熄屏本身没意义。只保留双键同按手动熄屏。 */
 #define DISPLAY_TIMEOUT_MS  0xFFFFFFFF  /* 禁用自动熄屏（永不超时） */
@@ -160,27 +160,45 @@ static void axp2602_init(void) {
     if (i2c_param_config(AXP_I2C_PORT, &conf) != ESP_OK) return;
     if (i2c_driver_install(AXP_I2C_PORT, conf.mode, 0, 0, 0) != ESP_OK) return;
     vTaskDelay(pdMS_TO_TICKS(50));
-    /* 读取芯片 ID 寄存器 0x03 校验（AXP2602 通常返回 0x34 或类似） */
+    /* AXP2602 芯片 ID 寄存器 0x00，预期 0x1C */
     uint8_t id = 0;
-    if (axp_read_reg(0x03, &id) == ESP_OK) {
+    if (axp_read_reg(0x00, &id) == ESP_OK && id == 0x1C) {
         ESP_LOGI(TAG, "AXP2602 detected, chip ID=0x%02X", id);
+        /* 唤醒：清寄存器 0x02 bit0（sleep 位）*/
+        uint8_t pwron = 0;
+        if (axp_read_reg(0x02, &pwron) == ESP_OK) {
+            pwron &= ~0x01;
+            uint8_t buf[] = {0x02, pwron};
+            i2c_master_write_to_device(AXP_I2C_PORT, AXP2602_I2C_ADDR,
+                                       buf, 2, pdMS_TO_TICKS(50));
+        }
         s_axp_inited = true;
+        vTaskDelay(pdMS_TO_TICKS(350)); /* 等 SOC 稳定 */
     } else {
-        ESP_LOGW(TAG, "AXP2602 not responding on I2C");
+        ESP_LOGW(TAG, "AXP2602 not responding or wrong ID (got 0x%02X)", id);
     }
 }
 
 /* 返回电池电压 (mV)，失败返回 -1 */
 static int axp2602_read_battery_mv(void) {
     if (!s_axp_inited) return -1;
-    /* AXP2602 电池电压高字节：0x34, 低字节：0x35 (bit7-4 有效)
-     * 公式: voltage = (H << 4 | L >> 4) * 1.1mV  (参考 LILYGO AXP2602 demo) */
+    /* AXP2602 VBAT 寄存器：0x04(高字节, 低6位有效) + 0x05(低8位)
+     * 16位大端序，低14位有效，1 LSB = 1mV */
     uint8_t hi = 0, lo = 0;
-    if (axp_read_reg(0x34, &hi) != ESP_OK) return -1;
-    if (axp_read_reg(0x35, &lo) != ESP_OK) return -1;
-    int raw = ((int)hi << 4) | ((lo >> 4) & 0x0F);
-    int mv = (int)(raw * 1.1f);
-    return mv;
+    if (axp_read_reg(0x04, &hi) != ESP_OK) return -1;
+    if (axp_read_reg(0x05, &lo) != ESP_OK) return -1;
+    int raw = (((int)hi << 8) | lo) & 0x3FFF;
+    return raw;
+}
+
+/* 读取电池百分比 (0-100)，硬件库仑计 SOC 寄存器 0x08 */
+static int axp2602_read_battery_pct(void) {
+    if (!s_axp_inited) return -1;
+    uint8_t soc = 0;
+    if (axp_read_reg(0x08, &soc) == ESP_OK && soc <= 100) {
+        return soc;
+    }
+    return -1;
 }
 
 static int battery_mv_to_pct(int mv) {
@@ -409,7 +427,7 @@ static int fb_text_right(int x_right, int y, const char *s, uint16_t c) {
     return lcd_font_draw_text_right(s_fb, LCD_WIDTH, LCD_HEIGHT, x_right, y, s, c);
 }
 
-/* 截断字符串到指定像素宽度，末尾加 "~"。
+/* 截断字符串到指定像素宽度，末尾加波浪号。
  * ASCII 按字节、CJK 按 3 字节 UTF-8 逐字符测量。 */
 static void fb_text_trunc(int x, int y, const char *s, uint16_t c, int max_w) {
     int full_w = lcd_font_text_width(s);
@@ -559,11 +577,17 @@ static void render_statusbar(int active_count, int channel)
     static uint32_t s_last_batt_read = 0;
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
     if (s_batt_pct < 0 || now - s_last_batt_read > 5000) {
-        int mv = axp2602_read_battery_mv();
-        if (mv > 0) {
-            s_batt_pct = battery_mv_to_pct(mv);
-        } else if (s_batt_pct < 0) {
-            s_batt_pct = 75;
+        /* 优先读硬件库仑计 SOC（寄存器 0x08），失败则用电压换算 */
+        int soc = axp2602_read_battery_pct();
+        if (soc >= 0) {
+            s_batt_pct = soc;
+        } else {
+            int mv = axp2602_read_battery_mv();
+            if (mv > 0) {
+                s_batt_pct = battery_mv_to_pct(mv);
+            } else if (s_batt_pct < 0) {
+                s_batt_pct = 75;
+            }
         }
         s_last_batt_read = now;
     }
@@ -1194,7 +1218,7 @@ static void refresh_task(void *arg)
                     if (active > 0) {
                         s_page = LCD_PAGE_LIST;
                     }
-                    /* 无目标时停留在主页（状态栏会显示"搜索中"） */
+                    /* 无目标时停留在主页（状态栏会显示搜索中） */
                 } else if (key == LCD_KEY_PREV) {
                     s_page = LCD_PAGE_SIM_CONFIG;
                     s_scroll_offset = 0;
