@@ -1,7 +1,12 @@
 /**
  * lcd_display.c — ST7789 LCD 显示模块（T-Display-C5 中文 UI 版）
  *
- * lcdfix9：全屏 DMA 一次推送（与 LILYGO 官方一致），修复布局遮挡/偏移
+ * lcdfix10：
+ *   - DMA 传输完成信号量同步（on_color_trans_done），消除撕裂/杂线
+ *   - LCD 初始化必须在 WiFi/BLE 之前，保证 108KB 内部 SRAM 可用
+ *   - 修复列表 UAS ID / 详情 MAC 溢出截断
+ *   - 字库补 "准"、几何符号区(●○★→等)
+ *   - 详情页布局重排，信息完整显示
  *
  * 硬件：LILYGO T-Display-C5 (1.9" ST7789, 170×320, RGB565, SPI)
  * 字体：16×16 CJK + 8×16 ASCII 混合排版
@@ -39,19 +44,23 @@ static const char *TAG = "lcd_display";
 static sim_display_info_t s_sim_info = {0};
 
 void lcd_display_set_sim_info(const sim_display_info_t *info) {
-    if (info) memcpy(&s_sim_info, info, sizeof(sim_display_info_t));
+    if (info) memcpy(&s_sim_info, info, sizeof(sim_info));
 }
 
 /* ================================================================
  * 内部状态
  * ================================================================ */
 static esp_lcd_panel_handle_t s_panel = NULL;
-static uint16_t *s_fb = NULL;           /* 渲染帧缓冲（优先内部 SRAM+DMA） */
-static uint16_t *s_dma_buf = NULL;      /* DMA bounce buffer（仅 PSRAM 回退时用） */
-static bool s_use_full_dma = false;     /* 是否成功用全屏内部 SRAM DMA */
-static int s_dma_lines = 40;            /* 回退模式每次 DMA 行数 */
+static uint16_t *s_fb = NULL;
+static uint16_t *s_dma_buf = NULL;
+static bool s_use_full_dma = false;
+static int s_dma_lines = 40;
 static TaskHandle_t s_refresh_task = NULL;
 static QueueHandle_t s_key_queue = NULL;
+
+/* DMA 完成同步信号量：on_color_trans_done 回调中 give，
+ * flush 结束前 take，确保 DMA 不读正在被重写的帧缓冲 */
+static SemaphoreHandle_t s_dma_done_sem = NULL;
 
 static uav_track_t *s_tracker = NULL;
 static void *s_tracker_mutex = NULL;
@@ -80,16 +89,29 @@ static volatile int s_scroll_offset = 0;
 #define C_TEAL      0x0410
 #define C_DIM       0x4208
 
-/* 状态栏/底栏高度（lcdfix9：增大到 22/18，确保 16px 字体不被裁切） */
+/* 状态栏/底栏高度 */
 #define STATUSBAR_H   22
 #define FOOTER_H      18
 #define CONTENT_Y0    STATUSBAR_H
 #define CONTENT_Y1    (LCD_HEIGHT - FOOTER_H)
 #define CONTENT_H     (CONTENT_Y1 - CONTENT_Y0)
 
-/* 16px 字体在栏内垂直居中：y = (栏高 - 16) / 2 */
 #define SB_TEXT_Y     ((STATUSBAR_H - FONT_LINE_H) / 2)
 #define FT_TEXT_Y     (CONTENT_Y1 + (FOOTER_H - FONT_LINE_H) / 2)
+
+/* ================================================================
+ * DMA 完成回调（ISR 安全）
+ * ================================================================ */
+static bool IRAM_ATTR lcd_color_trans_done_cb(esp_lcd_panel_io_handle_t panel_io,
+                                               esp_lcd_panel_io_event_data_t *edata,
+                                               void *user_ctx)
+{
+    BaseType_t higher_priority_task_wakeup = pdFALSE;
+    if (s_dma_done_sem) {
+        xSemaphoreGiveFromISR(s_dma_done_sem, &higher_priority_task_wakeup);
+    }
+    return higher_priority_task_wakeup == pdTRUE;
+}
 
 /* ================================================================
  * SPI + LCD 初始化
@@ -104,7 +126,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_FB_SIZE + 8,  /* 全屏一次传输 */
+        .max_transfer_sz = LCD_FB_SIZE + 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -128,7 +150,8 @@ static int init_lcd(void)
         .pclk_hz = LCD_SPI_FREQ_HZ,
         .spi_mode = 0,
         .trans_queue_depth = 10,
-        .on_color_trans_done = NULL,
+        .on_color_trans_done = lcd_color_trans_done_cb,
+        .user_ctx = NULL,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };
@@ -183,14 +206,20 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    /* 优先尝试全屏内部 SRAM DMA 缓冲（与 LILYGO 官方一致，108KB） */
+    /* 创建 DMA 完成信号量 */
+    s_dma_done_sem = xSemaphoreCreateBinary();
+    if (!s_dma_done_sem) {
+        ESP_LOGE(TAG, "DMA done semaphore creation failed");
+        return -1;
+    }
+
+    /* 优先全屏内部 SRAM DMA（必须在 WiFi/BLE 初始化前调用） */
     s_fb = heap_caps_malloc(LCD_FB_SIZE,
                             MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (s_fb) {
         s_use_full_dma = true;
         ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
     } else {
-        /* 回退1：PSRAM 渲染 + 内部 SRAM bounce buffer 分块传输 */
         ESP_LOGW(TAG, "全屏 SRAM 不足，回退 PSRAM + 分块 DMA");
         s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_fb) {
@@ -218,18 +247,23 @@ static int init_framebuffer(void)
 
 static void flush_framebuffer(void)
 {
-    if (!s_panel || !s_fb) return;
+    if (!s_panel || !s_fb || !s_dma_done_sem) return;
 
     if (s_use_full_dma) {
-        /* 全屏一次 DMA 推送，与 LILYGO 官方一致 */
+        /* 全屏一次 DMA 推送，等待传输完成再返回 */
+        xSemaphoreTake(s_dma_done_sem, 0);  /* 清理残留 */
         esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
+        /* 等待 DMA 完成回调，最多 100ms（20MHz 下 108KB 约 43ms） */
+        xSemaphoreTake(s_dma_done_sem, pdMS_TO_TICKS(100));
     } else {
-        /* 回退：分块 bounce */
+        /* 回退：分块 bounce——每块等 DMA 完成后再 memcpy 下一块 */
         for (int y = 0; y < LCD_HEIGHT; y += s_dma_lines) {
             int h = (y + s_dma_lines > LCD_HEIGHT) ? LCD_HEIGHT - y : s_dma_lines;
             size_t len = LCD_WIDTH * h * 2;
+            xSemaphoreTake(s_dma_done_sem, 0);
             memcpy(s_dma_buf, &s_fb[y * LCD_WIDTH], len);
             esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h, s_dma_buf);
+            xSemaphoreTake(s_dma_done_sem, pdMS_TO_TICKS(100));
         }
     }
 }
@@ -250,6 +284,7 @@ static void fb_fillrect(int x, int y, int w, int h, uint16_t c) {
     if (y < 0) { h += y; y = 0; }
     if (x + w > LCD_WIDTH) w = LCD_WIDTH - x;
     if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
+    if (w <= 0 || h <= 0) return;
     for (int r = y; r < y + h; r++)
         for (int col = x; col < x + w; col++)
             s_fb[r * LCD_WIDTH + col] = c;
@@ -278,6 +313,34 @@ static int fb_text_right(int x_right, int y, const char *s, uint16_t c) {
     return lcd_font_draw_text_right(s_fb, LCD_WIDTH, LCD_HEIGHT, x_right, y, s, c);
 }
 
+/* 截断字符串到指定像素宽度，末尾加 "~"。
+ * ASCII 按字节、CJK 按 3 字节 UTF-8 逐字符测量。 */
+static void fb_text_trunc(int x, int y, const char *s, uint16_t c, int max_w) {
+    int full_w = lcd_font_text_width(s);
+    if (full_w <= max_w) {
+        fb_text(x, y, s, c);
+        return;
+    }
+    /* 逐字符截断，~ 占 8px */
+    char buf[48];
+    int i = 0, w = 0;
+    const char *p = s;
+    while (*p && i < (int)sizeof(buf) - 2) {
+        int cw, step;
+        unsigned char ch = (unsigned char)*p;
+        if (ch < 0x80) { cw = FONT_ASCII_W; step = 1; }
+        else if ((ch & 0xE0) == 0xC0) { cw = FONT_CJK_W; step = 2; }
+        else { cw = FONT_CJK_W; step = 3; }
+        if (w + cw + FONT_ASCII_W > max_w) break;
+        for (int k = 0; k < step && p[k]; k++) buf[i++] = p[k];
+        w += cw;
+        p += step;
+    }
+    buf[i++] = '~';
+    buf[i] = '\0';
+    fb_text(x, y, buf, c);
+}
+
 /* ================================================================
  * 信号强度条形图
  * ================================================================ */
@@ -301,7 +364,7 @@ static void draw_signal_bars(int x, int y, int rssi, int max_bars)
     }
 }
 
-/* 协议类型转中文标签 — lcdfix9：国标/ASTM/欧盟统一为"标准"，DJI 保留 */
+/* 协议类型转中文标签 */
 static const char *protocol_label(uint8_t proto)
 {
     switch (proto) {
@@ -371,11 +434,8 @@ static void render_home(void)
         for (int i = 0; i < s_max_uavs; i++) {
             if (s_tracker[i].active) {
                 active++;
-                if (s_tracker[i].is_dji) {
-                    dji++;
-                } else {
-                    standard++;
-                }
+                if (s_tracker[i].is_dji) dji++;
+                else standard++;
             }
         }
         xSemaphoreGive(s_tracker_mutex);
@@ -383,7 +443,6 @@ static void render_home(void)
 
     int y = CONTENT_Y0 + 10;
 
-    /* 大数字：活跃目标数 */
     char num[8];
     snprintf(num, sizeof(num), "%d", active);
     fb_drawrect(8, y, LCD_WIDTH - 16, 52, C_TEAL);
@@ -396,7 +455,6 @@ static void render_home(void)
 
     y += 64;
 
-    /* 协议统计卡片 */
     fb_text(8, y, "协议分类", C_YELLOW);
     y += FONT_LINE_H + 4;
     fb_hline(8, y, LCD_WIDTH - 16, C_DIM);
@@ -418,7 +476,6 @@ static void render_home(void)
     fb_hline(8, y, LCD_WIDTH - 16, C_DIM);
     y += 10;
 
-    /* 模拟器状态 */
     if (s_sim_info.is_sim_running) {
         fb_text(8, y, "● 模拟发射中", C_GREEN);
         char cnt[16];
@@ -454,7 +511,6 @@ static void render_list(void)
     if (s_selection >= count) s_selection = count - 1;
     if (s_selection < 0) s_selection = 0;
 
-    /* lcdfix9：item_h=40，CONTENT_H=280，一屏可显示 7 个 */
     int item_h = 40;
     int visible = CONTENT_H / item_h;
     if (s_selection < s_scroll_offset) s_scroll_offset = s_selection;
@@ -473,24 +529,32 @@ static void render_list(void)
 
         int iy = y + 3;
 
-        /* 第一行：编号 + 型号/ID + 协议标签在右侧 */
-        char buf[64];
+        /* 第一行：编号 + 型号/ID（截断），协议标签右侧 */
+        const char *label_text;
+        char id_buf[24];
         if (s_tracker[i].is_dji && s_tracker[i].dji_model[0]) {
-            snprintf(buf, sizeof(buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
+            snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
+            label_text = id_buf;
         } else {
             const char *id = s_tracker[i].basic_id.uas_id[0] ?
                 s_tracker[i].basic_id.uas_id : "----";
-            snprintf(buf, sizeof(buf), "%d.%s", idx + 1, id);
+            snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, id);
+            label_text = id_buf;
         }
-        fb_text(5, iy, buf, sel ? C_WHITE : C_GREEN);
 
         const char *plabel = s_tracker[i].is_dji ? "DJI" : protocol_label(s_tracker[i].protocol);
         uint16_t pcolor = s_tracker[i].is_dji ? C_ORANGE : protocol_color(s_tracker[i].protocol);
+        int plabel_w = lcd_font_text_width(plabel);
+
+        /* ID 最大宽度：屏幕宽 - 左右边距 - 协议标签宽 - 间距 */
+        int max_id_w = LCD_WIDTH - 10 - plabel_w - 6;
+        fb_text_trunc(5, iy, label_text, sel ? C_WHITE : C_GREEN, max_id_w);
         fb_text_right(LCD_WIDTH - 5, iy, plabel, pcolor);
         iy += FONT_LINE_H + 1;
 
         /* 第二行：信号条 + RSSI + 高度 */
         draw_signal_bars(5, iy + 1, s_tracker[i].last_rssi, 4);
+        char buf[32];
         snprintf(buf, sizeof(buf), "%ddBm", s_tracker[i].last_rssi);
         fb_text(38, iy, buf, C_CYAN);
 
@@ -506,7 +570,6 @@ static void render_list(void)
         y += item_h;
     }
 
-    /* 滚动条 */
     if (count > visible) {
         int bar_h = CONTENT_H * visible / count;
         int bar_y = CONTENT_Y0 + CONTENT_H * s_scroll_offset / count;
@@ -542,25 +605,25 @@ static void render_detail(void)
     int y = CONTENT_Y0 + 4;
     char buf[48];
 
-    /* 标题区 */
+    /* 标题行 */
     if (s_tracker[idx].is_dji) {
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(60, 30, 0));
         const char *model = s_tracker[idx].dji_model[0] ?
             s_tracker[idx].dji_model : "DJI Drone";
-        fb_text(4, y, model, C_ORANGE);
+        fb_text_trunc(4, y, model, C_ORANGE, LCD_WIDTH - 8);
     } else {
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(0, 30, 60));
         fb_text(4, y, "目标详情", C_CYAN);
     }
     y += FONT_LINE_H + 8;
 
-    /* ID */
+    /* ID / SN — 截断到屏幕宽度 */
     if (s_tracker[idx].is_dji && s_tracker[idx].dji_serial[0]) {
         fb_text(4, y, "SN", C_GREEN);
-        fb_text(36, y, s_tracker[idx].dji_serial, C_WHITE);
+        fb_text_trunc(30, y, s_tracker[idx].dji_serial, C_WHITE, LCD_WIDTH - 34);
     } else if (s_tracker[idx].basic_id.uas_id[0]) {
         fb_text(4, y, "ID", C_GREEN);
-        fb_text(36, y, s_tracker[idx].basic_id.uas_id, C_WHITE);
+        fb_text_trunc(30, y, s_tracker[idx].basic_id.uas_id, C_WHITE, LCD_WIDTH - 34);
     }
     y += FONT_LINE_H + 4;
 
@@ -568,7 +631,7 @@ static void render_detail(void)
     fb_text(4, y, "信号", C_GREEN);
     draw_signal_bars(38, y + 2, s_tracker[idx].last_rssi, 5);
     snprintf(buf, sizeof(buf), "%ddBm", s_tracker[idx].last_rssi);
-    fb_text(78, y, buf, C_WHITE);
+    fb_text(80, y, buf, C_WHITE);
     y += FONT_LINE_H + 6;
 
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
@@ -585,7 +648,7 @@ static void render_detail(void)
         snprintf(buf, sizeof(buf), "速度  %.1fm/s", s_tracker[idx].dji_speed_h);
         fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
         if (s_tracker[idx].dji_heading >= 0) {
-            snprintf(buf, sizeof(buf), "航向  %.1f", s_tracker[idx].dji_heading);
+            snprintf(buf, sizeof(buf), "航向  %.1f度", s_tracker[idx].dji_heading);
             fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
         }
     } else {
@@ -604,7 +667,7 @@ static void render_detail(void)
             fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
         }
         if (s_tracker[idx].location.direction != 0) {
-            snprintf(buf, sizeof(buf), "航向  %.1f", s_tracker[idx].location.direction);
+            snprintf(buf, sizeof(buf), "航向  %.1f度", s_tracker[idx].location.direction);
             fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
         }
     }
@@ -613,13 +676,13 @@ static void render_detail(void)
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
     y += 6;
 
-    /* MAC */
+    /* MAC — 标签+值，标签占 4 字符宽(32px)，值从 36px 开始 */
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              s_tracker[idx].mac[0], s_tracker[idx].mac[1],
              s_tracker[idx].mac[2], s_tracker[idx].mac[3],
              s_tracker[idx].mac[4], s_tracker[idx].mac[5]);
     fb_text(4, y, "MAC", C_GREEN);
-    fb_text(36, y, buf, C_GRAY);
+    fb_text(34, y, buf, C_GRAY);
     y += FONT_LINE_H + 2;
 
     snprintf(buf, sizeof(buf), "信道  %d", s_tracker[idx].last_channel & 0x7F);
@@ -634,7 +697,7 @@ static void render_detail(void)
             snprintf(buf, sizeof(buf), "%lu分%lu秒前",
                      (unsigned long)(ago / 60), (unsigned long)(ago % 60));
         fb_text(4, y, "更新", C_GREEN);
-        fb_text(36, y, buf, C_LTGRAY);
+        fb_text(34, y, buf, C_LTGRAY);
     }
 }
 
@@ -668,7 +731,7 @@ static void render_simconfig(void)
     y += FONT_LINE_H + 4;
 
     fb_text(4, y, "ID", C_GREEN);
-    fb_text(36, y,
+    fb_text(30, y,
         s_sim_info.sim_uas_id[0] ? s_sim_info.sim_uas_id : "SIM-C5",
         C_WHITE);
     y += FONT_LINE_H + 8;
@@ -709,7 +772,7 @@ static void render_simstatus(void)
     fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
     snprintf(buf, sizeof(buf), "经度  %.6f", s_sim_info.sim_lon);
     fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "航向  %.1f°", s_sim_info.sim_heading);
+    snprintf(buf, sizeof(buf), "航向  %.1f度", s_sim_info.sim_heading);
     fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
     snprintf(buf, sizeof(buf), "高度  %.1fm", s_sim_info.sim_alt);
     fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 2;
@@ -816,7 +879,7 @@ static void refresh_task(void *arg)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -875,13 +938,13 @@ static void button_poll_task(void *arg)
  * ================================================================ */
 int lcd_display_init(void)
 {
-    ESP_LOGI(TAG, "=== LCD 模块初始化（lcdfix9 全屏DMA）===");
+    ESP_LOGI(TAG, "=== LCD 模块初始化（lcdfix10）===");
 
     if (init_framebuffer() != 0) return -1;
     if (init_lcd() != 0) return -1;
     init_backlight();
 
-    /* 开机测试：四角方块 + 十字线，确认满屏和方向 */
+    /* 开机测试：四角方块 + 十字线 */
     fb_fill(rgb565(0, 20, 50));
     fb_fillrect(0, 0, 20, 20, C_WHITE);
     fb_fillrect(LCD_WIDTH - 20, 0, 20, 20, C_WHITE);
@@ -892,7 +955,6 @@ int lcd_display_init(void)
     flush_framebuffer();
     vTaskDelay(pdMS_TO_TICKS(1500));
 
-    /* 开机 Logo */
     fb_fill(C_BG);
     fb_text_center(140, "无人机侦测器", C_CYAN);
     fb_text_center(164, "T-Display-C5", C_GRAY);
