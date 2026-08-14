@@ -33,7 +33,10 @@ static bool is_cjk(uint32_t cp)
     return (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK Unified Ideographs */
            (cp >= 0x3000 && cp <= 0x303F) ||    /* CJK Symbols and Punctuation */
            (cp >= 0xFF00 && cp <= 0xFFEF) ||    /* Halfwidth and Fullwidth Forms */
-           (cp >= 0x2000 && cp <= 0x206F);      /* General Punctuation */
+           (cp >= 0x2000 && cp <= 0x206F) ||    /* General Punctuation */
+           (cp >= 0x25A0 && cp <= 0x25FF) ||    /* Geometric Shapes (●○■□▲▼ etc.) */
+           (cp >= 0x2600 && cp <= 0x26FF) ||    /* Misc Symbols (★ etc.) */
+           (cp >= 0x2190 && cp <= 0x21FF);      /* Arrows (→←↑↓ etc.) */
 }
 
 /* UTF-8 解码：返回 codepoint，*bytes_consumed 为消耗的字节数 */
