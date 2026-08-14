@@ -80,8 +80,8 @@ static volatile int s_scroll_offset = 0;
 #define C_DIM       0x4208   /* 暗灰 */
 
 /* 状态栏/底栏高度 */
-#define STATUSBAR_H   22
-#define FOOTER_H      18
+#define STATUSBAR_H   20
+#define FOOTER_H      16
 #define CONTENT_Y0    STATUSBAR_H
 #define CONTENT_Y1    (LCD_HEIGHT - FOOTER_H)
 #define CONTENT_H     (CONTENT_Y1 - CONTENT_Y0)
@@ -139,11 +139,12 @@ static int init_lcd(void)
 
     esp_lcd_panel_init(s_panel);
     /* 竖屏 170×320，set_gap(35,0)，与 LILYGO 官方一致。
-     * 真机组合测试：
-     *   (true,false) → logo在底（上下颠倒），文字正向
-     *   (true,true)  → logo在顶，文字左右镜像
-     *   (false,true) → logo在顶，文字正向 ✓ */
-    esp_lcd_panel_mirror(s_panel, false, true);
+     * 真机逐组合测试结果（用户确认 LILYGO 标在顶为正确方向）：
+     *   (true,false) → 文字正向，上下颠倒（logo在底）
+     *   (false,true) → 文字镜像，上下颠倒（logo在底）
+     *   (true,true)  → 双镜像=180°旋转，文字正向+logo在顶 ✓
+     *   (false,false) → 未测 */
+    esp_lcd_panel_mirror(s_panel, true, true);
     esp_lcd_panel_invert_color(s_panel, true);
     esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
@@ -464,7 +465,7 @@ static void render_list(void)
     if (s_selection >= count) s_selection = count - 1;
     if (s_selection < 0) s_selection = 0;
 
-    int item_h = 50;
+    int item_h = 46;
     int visible = CONTENT_H / item_h;
     if (s_selection < s_scroll_offset) s_scroll_offset = s_selection;
     if (s_selection >= s_scroll_offset + visible) s_scroll_offset = s_selection - visible + 1;
