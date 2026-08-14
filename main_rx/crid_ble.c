@@ -412,6 +412,11 @@ ble_advertise_start(void)
 
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    /* lcdfix19：强制使用 Legacy 可连接广播。
+     * 打开 BLE_EXT_ADV 后 NimBLE 默认会走 Extended advertising，
+     * 部分手机/微信浏览器对 extended connectable adv 兼容性差，搜不到设备。
+     * NUS 数据量小、不需要 255 字节 adv payload，Legacy 兼容性最好。 */
+    adv_params.legacy_pdu = 1;
 
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event_cb, NULL);

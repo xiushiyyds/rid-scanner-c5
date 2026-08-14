@@ -95,31 +95,48 @@ static const uint8_t *find_odid_service_data(const uint8_t *adv_data, uint8_t ad
 /* ================================================================
  * 处理一条广播报告
  *
- * BLE 广播携带的是单条 25 字节 ODID 消息（非 MessagePack）。
- * 为复用 WiFi 路径的 MessagePack 解析器，将单条消息包装成
- * 1-MsgPack：[0xF0][0x19][0x01][25-byte message]
+ * ASTM F3411 BLE Service Data (UUID 0xFFFA):
+ *   [UUID_LE: FA FF][App Code: 0x0D][message_counter: 1B][payload]
+ * payload 有两种形态：
+ *   (a) 单条 25 字节消息（counter=1..10，每条广播只发一个消息类型）
+ *   (b) MessagePack：[0xF0][25][N][N*25]，一条广播里打包多条消息
+ *
+ * lcdfix19 之前写死 msg_len==25，多消息 MessagePack 被整包丢弃，
+ * 导致 Basic ID（SN）经常收不到（SN在counter=1的单消息里，若设备发的
+ * 是 pack 或带尾字节就会被丢）。现在两种形态都支持。
  * ================================================================ */
 static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t data_len,
                                int8_t rssi, bool is_extended) {
     uint8_t msg_len = 0;
-    const uint8_t *odid_msg = find_odid_service_data(data, data_len, &msg_len);
+    const uint8_t *payload = find_odid_service_data(data, data_len, &msg_len);
 
-    if (odid_msg == NULL || msg_len == 0) {
+    if (payload == NULL || msg_len == 0) {
         return;  /* 不是 ODID 广播 */
     }
 
-    /* ASTM F3411 BLE: 每条广播恰好 25 字节单消息 */
-    if (msg_len != 25) {
-        ESP_LOGD(TAG, "Unexpected BLE ODID msg_len=%d (expect 25)", msg_len);
+    const uint8_t *pack_data;
+    uint8_t pack_len;
+    uint8_t pack_buf[3 + 10 * 25];  /* 单消息包装上限 */
+
+    if (msg_len == 25) {
+        /* 形态(a)：单条 25 字节消息，包装成 1-MsgPack */
+        pack_buf[0] = 0xF0;  /* MessageType=PACKED(0xF), ProtoVersion=ASTM(0x0) */
+        pack_buf[1] = 25;    /* SingleMessageSize */
+        pack_buf[2] = 1;     /* MsgPackSize = 1 */
+        memcpy(pack_buf + 3, payload, 25);
+        pack_data = pack_buf;
+        pack_len = 28;
+    } else if (msg_len >= 28 && (payload[0] >> 4) == 0xF &&
+               payload[1] == 25 && payload[2] >= 1 && payload[2] <= 10 &&
+               msg_len >= 3 + payload[2] * 25) {
+        /* 形态(b)：已经是 MessagePack，直接送解析器 */
+        pack_data = payload;
+        pack_len = 3 + payload[2] * 25;
+    } else {
+        ESP_LOGD(TAG, "Unsupported BLE ODID len=%d first=%02x", msg_len,
+                 msg_len > 0 ? payload[0] : 0);
         return;
     }
-
-    /* 将单条消息包装成 MessagePack 供 parser 统一处理 */
-    uint8_t pack_buf[28];  /* 3 字节头 + 25 字节消息 */
-    pack_buf[0] = 0xF0;    /* MessageType=PACKED(0xF), ProtoVersion=ASTM(0x0) */
-    pack_buf[1] = 25;      /* SingleMessageSize */
-    pack_buf[2] = 1;       /* MsgPackSize = 1 */
-    memcpy(pack_buf + 3, odid_msg, 25);
 
     /* 构造 sniffer 消息，复用现有解析队列 */
     sniffer_msg_t msg;
@@ -144,9 +161,9 @@ static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t
         msg.channel |= 0x80;  /* 高位标记为 LR（channel 实际值 0-39 不受影响） */
     }
 
-    /* 复制包装后的 MessagePack (28 字节) */
-    memcpy(msg.data, pack_buf, 28);
-    msg.data_len = 28;
+    /* 复制包装后的 MessagePack */
+    memcpy(msg.data, pack_data, pack_len);
+    msg.data_len = pack_len;
 
     ESP_LOGD(TAG, "BLE ODID: rssi=%d ext=%d", rssi, is_extended);
 
