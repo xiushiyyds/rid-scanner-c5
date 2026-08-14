@@ -209,65 +209,21 @@ static int ble_scan_gap_event(struct ble_gap_event *event, void *arg) {
  * ================================================================ */
 static int start_scan(void) {
     /*
-     * 先尝试 Extended Advertising 扫描（BT5，含 Coded PHY / Long Range）。
-     * NimBLE API 签名 (ESP-IDF v5.4)：
-     *   ble_gap_ext_disc(own_addr_type, duration, period,
-     *                    filter_duplicates, filter_policy, limited,
-     *                    uncoded_params(1M), coded_params,
-     *                    cb, cb_arg)
-     * duration=0 且 period=0 表示持续扫描直到取消。
-     *
-     * own_addr_type 使用 BLE_OWN_ADDR_PUBLIC（注意：不是 ble_addr_type_public）。
+     * lcdfix10：优先使用 Legacy 扫描，提高与手机 BLE 广播的兼容性。
+     * Extended scanning 在某些控制器版本上会与 legacy advertising
+     * 产生资源争用，导致本机广播不可见。先确保 Legacy 稳定，后续有
+     * Long Range 需求再切换。
      */
     struct ble_gap_disc_params disc_params = {0};
     int rc;
 
-#if MYNEWT_VAL(BLE_EXT_ADV)
-    struct ble_gap_ext_disc_params uncoded_params = {0};
-    struct ble_gap_ext_disc_params coded_params = {0};
-
-    /* itvl/window = 0 表示控制器默认（连续扫描）；passive=1 不发 scan request */
-    uncoded_params.itvl = 0;
-    uncoded_params.window = 0;
-    uncoded_params.passive = 1;
-
-    coded_params.itvl = 0;
-    coded_params.window = 0;
-    coded_params.passive = 1;
-
-    rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC,
-                              0,      /* duration: 连续 */
-                              0,      /* period: 连续 */
-                              0,      /* filter_duplicates: 关闭 */
-                              0,      /* filter_policy: 不过滤 */
-                              0,      /* limited: 0 (general discovery) */
-                              &uncoded_params,  /* 1M PHY */
-                              &coded_params,    /* Coded PHY (Long Range) */
-                              ble_scan_gap_event, NULL);
-
-    if (rc == 0) {
-        s_ext_adv_type = 1;
-        ESP_LOGI(TAG, "BLE Extended scan started (1M + Coded PHY)");
-        return 0;
-    }
-
-    ESP_LOGW(TAG, "Extended scan failed (%d), falling back to legacy", rc);
-#else
-    ESP_LOGI(TAG, "BLE Extended ADV not enabled, using legacy scan");
-#endif
-
-    /* 回退到 Legacy 扫描
-     * struct ble_gap_disc_params { itvl, window, filter_policy,
-     *                             limited:1, passive:1, filter_duplicates:1 }
-     * ble_gap_disc(own_addr_type, duration_ms, disc_params, cb, cb_arg)
-     */
     memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.itvl = 0;             /* 0 = 控制器默认（连续） */
+    disc_params.itvl = 0;             /* 0 = 控制器默认（连续扫描） */
     disc_params.window = 0;
     disc_params.filter_policy = 0;    /* 接收所有 */
     disc_params.limited = 0;
-    disc_params.passive = 1;          /* passive scan */
-    disc_params.filter_duplicates = 0;  /* 不去重，确保多目标都能收到 */
+    disc_params.passive = 1;          /* passive scan，不发 scan request */
+    disc_params.filter_duplicates = 0;
 
     rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
                       &disc_params, ble_scan_gap_event, NULL);
