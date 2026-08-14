@@ -531,7 +531,7 @@ static void render_list(void)
 
         /* 第一行：编号 + 型号/ID（截断），协议标签右侧 */
         const char *label_text;
-        char id_buf[24];
+        char id_buf[48];
         if (s_tracker[i].is_dji && s_tracker[i].dji_model[0]) {
             snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
             label_text = id_buf;
