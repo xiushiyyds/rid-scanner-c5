@@ -151,6 +151,19 @@ void lcd_display_command(const char *cmd);
 void lcd_display_show_pair_pin(const char *pin_code);
 
 /**
+ * 模拟器操作回调类型（由 app_main 注册）
+ */
+typedef void (*sim_action_cb_t)(void);
+typedef void (*sim_mode_cb_t)(int mode);
+
+/**
+ * 注册模拟器按键操作回调
+ */
+void lcd_display_register_sim_callbacks(sim_action_cb_t start,
+                                         sim_action_cb_t stop,
+                                         sim_mode_cb_t cycle_mode);
+
+/**
  * 读取电池电压（通过 AXP2602）
  * @param voltage_mv  输出电压指针（mV）
  * @return 0 成功, -1 失败
