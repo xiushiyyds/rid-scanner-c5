@@ -47,7 +47,7 @@ void lcd_display_set_sim_info(const sim_display_info_t *info) {
 static esp_lcd_panel_handle_t s_panel = NULL;
 static uint16_t *s_fb = NULL;           /* 渲染帧缓冲（PSRAM，不做DMA） */
 static uint16_t *s_dma_buf = NULL;      /* DMA bounce buffer（内部SRAM） */
-static int s_dma_lines = 40;            /* 每次DMA传输的行数 */
+static int s_dma_lines = 20;            /* 每次DMA传输的行数（小分块避免底部错位） */
 static TaskHandle_t s_refresh_task = NULL;
 static QueueHandle_t s_key_queue = NULL;
 
@@ -122,7 +122,7 @@ static int init_lcd(void)
         .cs_gpio_num = LCD_PIN_CS,
         .pclk_hz = LCD_SPI_FREQ_HZ,
         .spi_mode = 0,
-        .trans_queue_depth = 10,
+        .trans_queue_depth = 1,   /* 必须为1：bounce buffer 只有一块，等上一块 DMA 完成才能 memcpy 下一块 */
         .on_color_trans_done = NULL,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
@@ -138,9 +138,12 @@ static int init_lcd(void)
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_cfg, &s_panel));
 
     esp_lcd_panel_init(s_panel);
-    /* 竖屏 170×320，无需 swap_xy。
-     * 真机实测：同时 x/y 镜像才能正向显示。 */
-    esp_lcd_panel_mirror(s_panel, true, true);
+    /* 竖屏 170×320，set_gap(35,0)，与 LILYGO 官方一致。
+     * 真机组合测试：
+     *   (true,false) → logo在底（上下颠倒），文字正向
+     *   (true,true)  → logo在顶，文字左右镜像
+     *   (false,true) → logo在顶，文字正向 ✓ */
+    esp_lcd_panel_mirror(s_panel, false, true);
     esp_lcd_panel_invert_color(s_panel, true);
     esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
@@ -341,11 +344,11 @@ static void render_footer(lcd_page_t page)
 {
     fb_fillrect(0, CONTENT_Y1, LCD_WIDTH, FOOTER_H, rgb565(20, 30, 20));
     const char *hints[] = {
-        "User:翻页  Boot:选择",   /* HOME */
-        "User:翻页  Boot:详情",   /* LIST */
-        "User:翻页  Boot:返回",   /* DETAIL */
-        "User:翻页  Boot:切换",   /* SIM_CFG */
-        "User:翻页  Boot:停止",   /* SIM_STATUS */
+        "User下翻 长按上翻",   /* HOME */
+        "User翻页 Boot详情",   /* LIST */
+        "User翻页 长按返回",   /* DETAIL */
+        "User翻页 Boot切换",   /* SIM_CFG */
+        "User翻页 长按返回",   /* SIM_STATUS */
     };
     int idx = (int)page;
     if (idx < 0 || idx >= 5) idx = 0;
@@ -461,7 +464,7 @@ static void render_list(void)
     if (s_selection >= count) s_selection = count - 1;
     if (s_selection < 0) s_selection = 0;
 
-    int item_h = 58;
+    int item_h = 50;
     int visible = CONTENT_H / item_h;
     if (s_selection < s_scroll_offset) s_scroll_offset = s_selection;
     if (s_selection >= s_scroll_offset + visible) s_scroll_offset = s_selection - visible + 1;
@@ -475,12 +478,12 @@ static void render_list(void)
 
         /* 卡片背景 */
         uint16_t card_bg = sel ? rgb565(10, 40, 70) : C_CARD;
-        fb_fillrect(2, y, LCD_WIDTH - 4, item_h - 4, card_bg);
-        if (sel) fb_drawrect(2, y, LCD_WIDTH - 4, item_h - 4, C_CYAN);
+        fb_fillrect(2, y, LCD_WIDTH - 4, item_h - 3, card_bg);
+        if (sel) fb_drawrect(2, y, LCD_WIDTH - 4, item_h - 3, C_CYAN);
 
         int iy = y + 3;
 
-        /* 第一行：编号 + 型号/ID */
+        /* 第一行：编号 + 型号/ID + 协议标签在右侧 */
         char buf[64];
         if (s_tracker[i].is_dji && s_tracker[i].dji_model[0]) {
             snprintf(buf, sizeof(buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
@@ -490,34 +493,24 @@ static void render_list(void)
             snprintf(buf, sizeof(buf), "%d.%s", idx + 1, id);
         }
         fb_text(5, iy, buf, sel ? C_WHITE : C_GREEN);
-        iy += FONT_LINE_H;
-
-        /* 第二行：信号强度条 + RSSI 数值 + 协议标签 */
-        draw_signal_bars(5, iy + 2, s_tracker[i].last_rssi, 5);
-        snprintf(buf, sizeof(buf), "%ddBm", s_tracker[i].last_rssi);
-        fb_text(45, iy, buf, C_CYAN);
 
         const char *plabel = s_tracker[i].is_dji ? "DJI" : protocol_label(s_tracker[i].protocol);
         uint16_t pcolor = s_tracker[i].is_dji ? C_ORANGE : protocol_color(s_tracker[i].protocol);
         fb_text_right(LCD_WIDTH - 5, iy, plabel, pcolor);
-        iy += FONT_LINE_H + 2;
+        iy += FONT_LINE_H + 1;
 
-        /* 第三行：高度 + 速度 */
+        /* 第二行：信号条 + RSSI 数值 */
+        draw_signal_bars(5, iy + 1, s_tracker[i].last_rssi, 4);
+        snprintf(buf, sizeof(buf), "%ddBm", s_tracker[i].last_rssi);
+        fb_text(40, iy, buf, C_CYAN);
+
+        /* 右侧：高度 */
         if (s_tracker[i].is_dji) {
-            snprintf(buf, sizeof(buf), "高%d.%dm",
-                     (int)s_tracker[i].dji_altitude,
-                     (int)((s_tracker[i].dji_altitude - (int)s_tracker[i].dji_altitude) * 10));
+            snprintf(buf, sizeof(buf), "%.0fm", s_tracker[i].dji_altitude);
         } else if ((int)s_tracker[i].location.height != 0) {
-            snprintf(buf, sizeof(buf), "高%dm", (int)s_tracker[i].location.height);
+            snprintf(buf, sizeof(buf), "%dm", (int)s_tracker[i].location.height);
         } else {
-            snprintf(buf, sizeof(buf), "高--m");
-        }
-        fb_text(5, iy, buf, C_YELLOW);
-
-        if (s_tracker[i].is_dji) {
-            snprintf(buf, sizeof(buf), "速%.1fm/s", s_tracker[i].dji_speed_h);
-        } else {
-            snprintf(buf, sizeof(buf), "速%dm/s", (int)s_tracker[i].location.speed_horizontal);
+            snprintf(buf, sizeof(buf), "--m");
         }
         fb_text_right(LCD_WIDTH - 5, iy, buf, C_YELLOW);
 
@@ -847,21 +840,50 @@ static void refresh_task(void *arg)
  * ================================================================ */
 static void button_poll_task(void *arg)
 {
-    static uint32_t t_user = 0, t_boot = 0;
-    const uint32_t debounce = 300;
+    static uint32_t t_user_down = 0, t_boot_down = 0;
+    static bool user_down = false, boot_down = false;
+    static bool user_long_sent = false, boot_long_sent = false;
+    const uint32_t debounce = 30;
+    const uint32_t long_press = 600;
 
     while (1) {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        if (gpio_get_level(BTN_USER_PIN) == 0 && (now - t_user > debounce)) {
-            lcd_display_send_key(LCD_KEY_NEXT);
-            t_user = now;
+        /* User 键：短按 NEXT，长按 PREV（上翻） */
+        if (gpio_get_level(BTN_USER_PIN) == 0) {
+            if (!user_down) {
+                user_down = true;
+                t_user_down = now;
+                user_long_sent = false;
+            } else if (!user_long_sent && (now - t_user_down > long_press)) {
+                lcd_display_send_key(LCD_KEY_PREV);
+                user_long_sent = true;
+            }
+        } else if (user_down) {
+            if (!user_long_sent && (now - t_user_down > debounce)) {
+                lcd_display_send_key(LCD_KEY_NEXT);
+            }
+            user_down = false;
         }
-        if (gpio_get_level(BTN_BOOT_PIN) == 0 && (now - t_boot > debounce)) {
-            lcd_display_send_key(LCD_KEY_SELECT);
-            t_boot = now;
+
+        /* Boot 键：短按 SELECT，长按 BACK（返回主页） */
+        if (gpio_get_level(BTN_BOOT_PIN) == 0) {
+            if (!boot_down) {
+                boot_down = true;
+                t_boot_down = now;
+                boot_long_sent = false;
+            } else if (!boot_long_sent && (now - t_boot_down > long_press)) {
+                lcd_display_send_key(LCD_KEY_BACK);
+                boot_long_sent = true;
+            }
+        } else if (boot_down) {
+            if (!boot_long_sent && (now - t_boot_down > debounce)) {
+                lcd_display_send_key(LCD_KEY_SELECT);
+            }
+            boot_down = false;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
