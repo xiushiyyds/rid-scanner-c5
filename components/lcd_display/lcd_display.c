@@ -45,8 +45,9 @@ void lcd_display_set_sim_info(const sim_display_info_t *info) {
  * 内部状态
  * ================================================================ */
 static esp_lcd_panel_handle_t s_panel = NULL;
-static uint16_t *s_fb = NULL;
-static bool s_fb_in_psram = false;
+static uint16_t *s_fb = NULL;           /* 渲染帧缓冲（PSRAM，不做DMA） */
+static uint16_t *s_dma_buf = NULL;      /* DMA bounce buffer（内部SRAM） */
+static int s_dma_lines = 40;            /* 每次DMA传输的行数 */
 static TaskHandle_t s_refresh_task = NULL;
 static QueueHandle_t s_key_queue = NULL;
 
@@ -98,7 +99,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_WIDTH * LCD_HEIGHT * 2 + 8,
+        .max_transfer_sz = 170 * 40 * 2 + 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -175,35 +176,39 @@ static void init_backlight(void)
  * ================================================================ */
 static int init_framebuffer(void)
 {
-    s_fb = heap_caps_malloc(LCD_FB_SIZE,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (s_fb) {
-        s_fb_in_psram = true;
-        ESP_LOGI(TAG, "帧缓冲 PSRAM: %d bytes", LCD_FB_SIZE);
-    } else {
+    /* 主帧缓冲放 PSRAM（108KB，内部 SRAM 装不下），仅做 CPU 渲染，不用于 DMA */
+    s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_fb) {
         s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-        if (s_fb) {
-            s_fb_in_psram = false;
-            ESP_LOGI(TAG, "帧缓冲 SRAM: %d bytes", LCD_FB_SIZE);
-        }
+        ESP_LOGW(TAG, "PSRAM 不可用，帧缓冲退到 SRAM");
     }
     if (!s_fb) {
         ESP_LOGE(TAG, "帧缓冲分配失败!");
         return -1;
     }
     memset(s_fb, 0, LCD_FB_SIZE);
+
+    /* DMA bounce buffer：内部 SRAM，每次拷 N 行再发，避开 PSRAM DMA 问题 */
+    size_t bounce_size = LCD_WIDTH * s_dma_lines * 2;
+    s_dma_buf = heap_caps_malloc(bounce_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_dma_buf) {
+        ESP_LOGE(TAG, "DMA bounce buffer 分配失败 (%d bytes)", bounce_size);
+        return -1;
+    }
+    ESP_LOGI(TAG, "帧缓冲: PSRAM 渲染 + SRAM DMA bounce %d bytes (每次 %d 行)",
+             bounce_size, s_dma_lines);
     return 0;
 }
 
 static void flush_framebuffer(void)
 {
-    if (!s_panel || !s_fb) return;
-    /* 与 LILYGO 官方 demo 一致：一次性整块发送全屏帧缓冲。
-     * PSRAM DMA 需要在发送前做 cache 回写，保证 SPI 读到最新数据。 */
-    if (s_fb_in_psram) {
-        esp_cache_msync(s_fb, LCD_FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (!s_panel || !s_fb || !s_dma_buf) return;
+    for (int y = 0; y < LCD_HEIGHT; y += s_dma_lines) {
+        int h = (y + s_dma_lines > LCD_HEIGHT) ? LCD_HEIGHT - y : s_dma_lines;
+        size_t len = LCD_WIDTH * h * 2;
+        memcpy(s_dma_buf, &s_fb[y * LCD_WIDTH], len);
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h, s_dma_buf);
     }
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
 }
 
 /* ================================================================
