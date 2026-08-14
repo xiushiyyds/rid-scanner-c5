@@ -167,9 +167,9 @@ static int init_lcd(void)
 
     esp_lcd_panel_init(s_panel);
 
-    /* 竖屏 170×320，set_gap(35,0)，与 LILYGO 官方一致。
-     * mirror(true,true) = 双镜像 = 180° 旋转，真机验证文字正向+logo在顶 */
-    esp_lcd_panel_mirror(s_panel, true, true);
+    /* 竖屏 170×320，set_gap(35,0)，与 LILYGO 官方 demo 一致。
+     * mirror(false,true) = 仅 Y 轴镜像（上下翻转），文字正向、logo在顶 */
+    esp_lcd_panel_mirror(s_panel, false, true);
     esp_lcd_panel_invert_color(s_panel, true);
     esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
@@ -792,9 +792,13 @@ static char s_pin[8] = {0};
 static uint32_t s_pin_time = 0;
 
 void lcd_display_show_pair_pin(const char *pin) {
-    if (pin) {
+    if (pin && pin[0]) {
         snprintf(s_pin, sizeof(s_pin), "%s", pin);
         s_pin_time = (uint32_t)(esp_timer_get_time() / 1000);
+    } else {
+        /* 空字符串=清除提示（连接成功后调用）*/
+        s_pin[0] = 0;
+        s_pin_time = 0;
     }
 }
 
@@ -802,23 +806,18 @@ static void render_pair_overlay(void)
 {
     if (!s_pin[0] || !s_pin_time) return;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    if (now - s_pin_time > 60000) {
+    if (now - s_pin_time > 3000) {
         s_pin[0] = 0;
         s_pin_time = 0;
         return;
     }
 
-    int bx = 15, by = 100, bw = LCD_WIDTH - 30, bh = 100;
+    int bx = 15, by = 120, bw = LCD_WIDTH - 30, bh = 60;
     fb_fillrect(bx, by, bw, bh, rgb565(5, 10, 35));
     fb_drawrect(bx, by, bw, bh, C_CYAN);
 
-    fb_text_center(by + 12, "蓝牙配对", C_CYAN);
-
-    int pin_w = lcd_font_text_width(s_pin);
-    lcd_font_draw_text(s_fb, LCD_WIDTH, LCD_HEIGHT,
-                       (LCD_WIDTH - pin_w) / 2, by + 42, s_pin, C_WHITE);
-
-    fb_text_center(by + 72, "请在手机输入", C_GRAY);
+    fb_text_center(by + 10, "蓝牙已连接", C_CYAN);
+    fb_text_center(by + 34, s_pin, C_WHITE);
 }
 
 /* ================================================================
