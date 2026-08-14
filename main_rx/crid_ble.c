@@ -413,6 +413,21 @@ ble_advertise_start(void)
 }
 
 /* ================================================================
+ * 延迟启动 BLE 扫描的任务
+ *
+ * 不能在 ble_on_sync()（NimBLE 主机任务上下文）里 vTaskDelay，
+ * 否则会阻塞整个 NimBLE host 任务，导致 GAP 事件无法处理、广播不可见。
+ * 单独创建一个短生命周期任务来延迟启动扫描。
+ * ================================================================ */
+static void ble_delayed_scan_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(800));
+    ESP_LOGI(TAG, "Starting BLE RID scan after advertising settle");
+    crid_ble_scan_start();
+    vTaskDelete(NULL);
+}
+
+/* ================================================================
  * NimBLE 同步回调 — 主机就绪后开始广播并查找句柄
  * ================================================================ */
 
@@ -443,13 +458,17 @@ ble_on_sync(void)
         ESP_LOGI(TAG, "RX handle=0x%04x", g_nus_rx_handle);
     }
 
+    /* 先启动广播——不阻塞 host 任务 */
     ble_advertise_start();
 
-    /* v1.8: NimBLE host 已同步，启动 BLE RID 扫描（与 advertising 并行）。
-     * 延迟 500ms 让 advertising 先稳定，再启动 scanning，避免控制器
-     * 在同时设置 adv + scan 时产生竞态导致广播不可见。 */
-    vTaskDelay(pdMS_TO_TICKS(500));
-    crid_ble_scan_start();
+    /* 延迟启动 BLE RID 扫描（单独任务，不阻塞 NimBLE host）。
+     * 给 advertising 800ms 稳定时间，避免控制器同时配置 adv+scan 的竞态。 */
+    BaseType_t ok = xTaskCreate(ble_delayed_scan_task, "ble_delayed_scan",
+                                2048, NULL, 4, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create delayed scan task, starting scan immediately");
+        crid_ble_scan_start();
+    }
 }
 
 /* ================================================================
