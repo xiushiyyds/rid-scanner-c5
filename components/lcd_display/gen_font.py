@@ -1,9 +1,29 @@
 #!/usr/bin/env python3
-"""Generate bitmap font C arrays for LCD display (lcdfix13)."""
+"""Generate bitmap font C arrays for LCD display (lcdfix14).
+
+改进：
+- 改用 WenQuanYi Micro Hei（等宽黑体，16px 渲染更规整，不像 Noto Sans CJK 那样歪扭缺角）
+- 字号从 15px 提升到 16px（占满字身，字形更饱满）
+- 渲染时对字形做 1px 下沉对齐，避免上高下矮
+- 补充 "择选键" 等遗漏字
+"""
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-CJK_FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+# 优先用 WenQuanYi Micro Hei（免费、字形规整、专为屏幕设计）
+CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+]
+
+def _find_font():
+    for p in CJK_FONT_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return CJK_FONT_CANDIDATES[-1]
+
+CJK_FONT_PATH = _find_font()
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_data.h")
 
 CJK_CHARS = """
@@ -34,9 +54,9 @@ CJK_CHARS = """
 滚转俯仰
 升降垂直
 机型
-操作
-员列
-表双
+操作员列表双
+择选键
+海拔
 """
 EXTRA_CHARS = "：，。、（）%/-+→←↑↓★●○◆◇▲▼■□"
 
@@ -49,17 +69,25 @@ def dedup(s):
     return r
 
 CJK_LIST = dedup(CJK_CHARS + EXTRA_CHARS)
+print(f"CJK font: {CJK_FONT_PATH}")
 print(f"CJK chars: {len(CJK_LIST)}")
 
-def render(font, char, w, h):
+def render(font, char, w, h, y_offset=0):
+    """渲染单个字形到 w×h 位图。
+    用固定起始位置代替 textbbox 居中，避免不同字符上下跳动。"""
     img = Image.new('1', (w, h), 0)
     draw = ImageDraw.Draw(img)
-    bbox = draw.textbbox((0, 0), char, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    x = (w - tw) // 2 - bbox[0]
-    y = (h - th) // 2 - bbox[1]
-    draw.text((x, y), char, fill=1, font=font)
+    # 用 anchor="lt" 固定左上角，配合 y_offset 让所有字基线一致
+    try:
+        draw.text((0, y_offset), char, fill=1, font=font, anchor="lt")
+    except TypeError:
+        # 旧版 Pillow 不支持 anchor，回退到 bbox 居中
+        bbox = draw.textbbox((0, 0), char, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = (w - tw) // 2 - bbox[0]
+        y = (h - th) // 2 - bbox[1] + y_offset
+        draw.text((x, y), char, fill=1, font=font)
     return list(img.getdata())
 
 def glyph_bytes(bitmap, w, h):
@@ -76,17 +104,18 @@ def glyph_bytes(bitmap, w, h):
     return result
 
 def main():
+    # ASCII 用 13px，CJK 用 16px（填满字身）
     ascii_font = ImageFont.truetype(CJK_FONT_PATH, 13)
-    cjk_font = ImageFont.truetype(CJK_FONT_PATH, 15)
+    cjk_font = ImageFont.truetype(CJK_FONT_PATH, 16)
 
     ascii_data = []
     for code in range(0x20, 0x7F):
-        bm = render(ascii_font, chr(code), 8, 16)
+        bm = render(ascii_font, chr(code), 8, 16, y_offset=1)
         ascii_data.append((chr(code), glyph_bytes(bm, 8, 16)))
 
     cjk_data = []
     for c in CJK_LIST:
-        bm = render(cjk_font, c, 16, 16)
+        bm = render(cjk_font, c, 16, 16, y_offset=0)
         cjk_data.append((c, glyph_bytes(bm, 16, 16)))
 
     # 关键：按码点排序，lcd_font.c 的 find_cjk_index 使用二分查找
@@ -94,8 +123,8 @@ def main():
 
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
         f.write("""/*
- * font_data.h — Auto-generated bitmap fonts (lcdfix13)
- * 8x16 ASCII + 16x16 CJK
+ * font_data.h — Auto-generated bitmap fonts (lcdfix14)
+ * 8x16 ASCII + 16x16 CJK (WenQuanYi Micro Hei)
  * DO NOT EDIT MANUALLY
  */
 #ifndef FONT_DATA_H
