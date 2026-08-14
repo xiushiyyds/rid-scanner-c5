@@ -7,7 +7,7 @@ CJK_FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_data.h")
 
 CJK_CHARS = """
-无人机侦测器就绪活跃目标协议国标大疆暂无信号扫描中按键翻页
+无人机侦测器就绪活跃目标协议国标大疆欧盟暂无信号扫描中按键翻页
 列表详情编号信号信道高度速度经度纬度距离航向电量最后发现
 模拟设置状态运行停止模式圆周往返搜索坐标
 发射中已停止帧数地址
