@@ -37,6 +37,9 @@ void crid_sniffer_start_channel_hold(void);
 /** lcdfix15: 停止信道保持任务（切到模拟模式前必须调用） */
 void crid_sniffer_stop_channel_hold(void);
 
+/** lcdfix19: 获取当前扫描信道（1/6/11 跳频中） */
+uint8_t crid_sniffer_get_current_channel(void);
+
 /**
  * v1.3: 停止 sniffer 并释放 Wi-Fi 资源
  * 用于模式切换到模拟模式前调用。

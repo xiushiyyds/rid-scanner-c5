@@ -874,6 +874,8 @@ void app_main(void) {
         );
         /* lcdfix16: 注册 GPS 状态提供回调（状态栏 GPS 图标用） */
         lcd_display_register_gps_provider(lcd_gps_provider);
+        /* lcdfix19: 注册当前扫描信道回调（1/6/11 跳频） */
+        lcd_display_register_channel_provider(crid_sniffer_get_current_channel);
         json_debug("RID_MAIN", "LCD display ready (ST7789 170x320, full DMA)");
     } else {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");

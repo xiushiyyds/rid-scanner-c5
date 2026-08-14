@@ -91,6 +91,13 @@ void lcd_display_register_gps_provider(lcd_gps_provider_cb_t cb) {
     s_gps_provider_cb = cb;
 }
 
+/* lcdfix19: 当前扫描信道回调（1/6/11 跳频） */
+static lcd_channel_provider_cb_t s_channel_provider_cb = NULL;
+
+void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb) {
+    s_channel_provider_cb = cb;
+}
+
 void lcd_display_register_sim_callbacks(sim_action_cb_t start,
                                          sim_action_cb_t stop,
                                          sim_mode_cb_t cycle_mode) {
@@ -1113,7 +1120,8 @@ static void refresh_task(void *arg)
             xSemaphoreGive(s_tracker_mutex);
         }
 
-        render_statusbar(active, FIXED_CHANNEL);
+        uint8_t cur_ch = s_channel_provider_cb ? s_channel_provider_cb() : FIXED_CHANNEL;
+        render_statusbar(active, cur_ch);
 
         switch (s_page) {
             case LCD_PAGE_HOME:       render_home(); break;

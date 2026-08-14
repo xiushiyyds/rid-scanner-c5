@@ -185,6 +185,13 @@ typedef bool (*lcd_gps_provider_cb_t)(double *lat, double *lon,
 void lcd_display_register_gps_provider(lcd_gps_provider_cb_t cb);
 
 /**
+ * lcdfix19: 当前扫描信道回调。
+ * 由 app_main 注册，LCD 状态栏渲染时调用以显示 1/6/11 跳频中的当前信道。
+ */
+typedef uint8_t (*lcd_channel_provider_cb_t)(void);
+void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb);
+
+/**
  * 模拟器显示信息结构体（多目标版）
  */
 typedef struct {

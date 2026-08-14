@@ -251,28 +251,51 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-/* ---- 信道保持任务 ----
+/* ---- 信道跳频扫描 ----
+ * lcdfix19: RID 广播可能在 1/6/11 任一信道，固定锁 6 会漏掉其他信道。
+ * 改为三信道轮询，每信道停留约 1.5 秒，一轮 4.5 秒覆盖全部非重叠信道。
+ * 起始信道仍为 6，保证向后兼容。 */
+static const uint8_t SCAN_CHANNELS[] = {1, 6, 11};
+#define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
+#define CHANNEL_DWELL_MS   1500
+static volatile uint8_t s_current_channel = 6;
+
+uint8_t crid_sniffer_get_current_channel(void) {
+    return s_current_channel;
+}
+
+/* ---- 信道跳频任务 ----
+ * 启动后先停 2 秒等 WiFi 控制器稳定，然后在 1/6/11 间轮询。
  * lcdfix15: 增加 stop flag，deinit 时必须停掉任务，
- * 否则切到模拟AP模式后它还在 esp_wifi_set_channel(6) 干扰AP。 */
+ * 否则切到模拟AP模式后它还在 esp_wifi_set_channel 干扰AP。 */
 static volatile bool s_hold_should_stop = false;
 static TaskHandle_t s_hold_task_handle = NULL;
 
 static void channel_hold_task(void *pvParameter) {
     char msg[64];
-    snprintf(msg, sizeof(msg), "Channel hold started, locked to channel %d", FIXED_CHANNEL);
+    snprintf(msg, sizeof(msg), "Channel hop started on 1/6/11 (dwell=%dms)", CHANNEL_DWELL_MS);
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    uint8_t idx = 0;
+    /* 从信道6开始（SCAN_CHANNELS[1]），与初始 set_channel 一致 */
+    for (uint8_t i = 0; i < SCAN_CHANNEL_COUNT; i++) {
+        if (SCAN_CHANNELS[i] == 6) { idx = i; break; }
+    }
+
     while (!s_hold_should_stop) {
-        esp_err_t ret = esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
+        uint8_t ch = SCAN_CHANNELS[idx];
+        s_current_channel = ch;
+        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
         if (ret != ESP_OK && !s_hold_should_stop) {
-            snprintf(msg, sizeof(msg), "set channel %d: %s", FIXED_CHANNEL, esp_err_to_name(ret));
+            snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
             json_warning("RID_SNIFF", msg);
         }
-        /* 用分段 delay 代替长阻塞，stop 时能快速退出 */
-        for (int i = 0; i < 30 && !s_hold_should_stop; i++) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+        idx = (idx + 1) % SCAN_CHANNEL_COUNT;
+        /* 分段 delay，stop 时能快速退出 */
+        for (int i = 0; i < (CHANNEL_DWELL_MS / 100) && !s_hold_should_stop; i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
     s_hold_should_stop = false;  /* 复位，供下次 init 重新使用 */
@@ -353,10 +376,12 @@ esp_err_t crid_sniffer_init(void) {
         return ret;
     }
 
-    /* lcdfix17: RID Beacon 全是 11b 1Mbps DSSS 帧。
-     * 只锁 11b 让控制器走最朴素的 DSSS 接收通路，共存更稳、灵敏度更高。
+    /* lcdfix19: 不锁协议！
+     * lcdfix17 曾加 esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B)，
+     * 只接收 11b DSSS 帧。但厂家 RID 测试模块的 WiFi 广播可能走 11g/11n
+     * OFDM 调制，锁 11b 会直接把这些帧在控制器层过滤掉，导致侦测 0 目标。
+     * v1.9.7（上午能收到的版本）没有这行，恢复默认（11b/g/n 全收）。
      * 关闭省电，确保射频持续接收。 */
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     ret = esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
