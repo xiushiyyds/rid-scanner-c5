@@ -518,9 +518,9 @@ static void draw_gps_icon(int x, int y, bool has_fix, int sats) {
             }
         }
     }
-    /* 卫星数（有定位才显示） */
+    /* 卫星数（有定位才显示）。缓冲区给 12 字节，避免 GCC -Wformat-truncation 报警。 */
     if (has_fix && sats > 0) {
-        char s[4];
+        char s[12];
         snprintf(s, sizeof(s), "%d", sats);
         /* 图标 8px 宽，右侧画数字 */
         fb_text(x + GPS_ICON_W + 1, y - 2, s, C_GREEN);
