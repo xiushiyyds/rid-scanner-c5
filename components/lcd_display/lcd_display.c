@@ -33,6 +33,8 @@
 #include "esp_cache.h"
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
+#include "driver/gpio.h"
+#include "esp_intr_alloc.h"
 
 #ifndef FIXED_CHANNEL
 #define FIXED_CHANNEL 6
@@ -452,7 +454,7 @@ static void render_footer(lcd_page_t page)
 {
     fb_fillrect(0, CONTENT_Y1, LCD_WIDTH, FOOTER_H, rgb565(20, 30, 20));
     const char *hints[] = {
-        "Boot列表  双键关机",
+        "短按列表 长按模拟",
         "User选择 Boot详情",
         "User切换 Boot返回",
         "User选项 Boot启停",
@@ -683,73 +685,70 @@ static void render_detail(void)
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
     y += 4;
 
-    /* 飞行数据：坐标（经度/纬度）格式化为 0.000000，两列布局 */
+    /* 飞行数据：lcdfix14 始终显示字段，0 值也显示（用户要全字段） */
     if (s_tracker[idx].is_dji) {
         double lat = s_tracker[idx].dji_latitude;
         double lon = s_tracker[idx].dji_longitude;
-        if (lat != 0 || lon != 0) {
-            snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "经度 %.6f", lon);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].dji_altitude != 0) {
-            snprintf(buf, sizeof(buf), "高度 %.1fm", s_tracker[idx].dji_altitude);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].dji_speed_h != 0) {
-            snprintf(buf, sizeof(buf), "速度 %.1fm/s", s_tracker[idx].dji_speed_h);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].dji_heading >= 0) {
-            snprintf(buf, sizeof(buf), "航向 %.1f度", s_tracker[idx].dji_heading);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
+        snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
+        fb_text(4, y, buf, lat != 0 ? C_CYAN : C_GRAY); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "经度 %.6f", lon);
+        fb_text(4, y, buf, lon != 0 ? C_CYAN : C_GRAY); y += FONT_LINE_H + 1;
+
+        float alt = s_tracker[idx].dji_altitude;
+        snprintf(buf, sizeof(buf), "海拔 %.1fm", alt);
+        fb_text(4, y, buf, alt != 0 ? C_YELLOW : C_GRAY); y += FONT_LINE_H + 1;
+
+        float spd = s_tracker[idx].dji_speed_h;
+        snprintf(buf, sizeof(buf), "速度 %.1fm/s", spd);
+        fb_text(4, y, buf, spd > 0 ? C_YELLOW : C_GRAY); y += FONT_LINE_H + 1;
+
+        float hdg = s_tracker[idx].dji_heading;
+        snprintf(buf, sizeof(buf), "航向 %.1f度", hdg);
+        fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+
         /* 飞手位置 */
-        if (s_tracker[idx].dji_pilot_lat != 0 || s_tracker[idx].dji_pilot_lon != 0) {
-            y += 2;
-            fb_text(4, y, "飞手位置", C_GREEN); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].dji_pilot_lat);
-            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].dji_pilot_lon);
-            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
-        }
+        double plat = s_tracker[idx].dji_pilot_lat;
+        double plon = s_tracker[idx].dji_pilot_lon;
+        y += 1;
+        fb_text(4, y, "飞手位置", C_GREEN); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "  %.6f", plat);
+        fb_text(4, y, buf, plat != 0 ? C_LTGRAY : C_GRAY); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "  %.6f", plon);
+        fb_text(4, y, buf, plon != 0 ? C_LTGRAY : C_GRAY); y += FONT_LINE_H + 1;
     } else {
         /* 标准 RID */
         double lat = s_tracker[idx].location.latitude;
         double lon = s_tracker[idx].location.longitude;
-        if (lat != 0 || lon != 0) {
-            snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "经度 %.6f", lon);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
-        }
-        if ((int)s_tracker[idx].location.height != 0) {
-            snprintf(buf, sizeof(buf), "相对高 %.0fm", s_tracker[idx].location.height);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].location.altitude_geo != 0) {
-            snprintf(buf, sizeof(buf), "海拔 %.0fm", s_tracker[idx].location.altitude_geo);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].location.speed_horizontal > 0) {
-            snprintf(buf, sizeof(buf), "速度 %.1fm/s", s_tracker[idx].location.speed_horizontal);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
-        if (s_tracker[idx].location.direction != 0) {
-            snprintf(buf, sizeof(buf), "航向 %.1f度", s_tracker[idx].location.direction);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
-        }
+        snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
+        fb_text(4, y, buf, lat != 0 ? C_CYAN : C_GRAY); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "经度 %.6f", lon);
+        fb_text(4, y, buf, lon != 0 ? C_CYAN : C_GRAY); y += FONT_LINE_H + 1;
+
+        float rh = s_tracker[idx].location.height;
+        snprintf(buf, sizeof(buf), "相对高 %.0fm", rh);
+        fb_text(4, y, buf, rh != 0 ? C_YELLOW : C_GRAY); y += FONT_LINE_H + 1;
+
+        float ga = s_tracker[idx].location.altitude_geo;
+        snprintf(buf, sizeof(buf), "海拔 %.0fm", ga);
+        fb_text(4, y, buf, ga != 0 ? C_YELLOW : C_GRAY); y += FONT_LINE_H + 1;
+
+        float spd = s_tracker[idx].location.speed_horizontal;
+        snprintf(buf, sizeof(buf), "速度 %.1fm/s", spd);
+        fb_text(4, y, buf, spd > 0 ? C_YELLOW : C_GRAY); y += FONT_LINE_H + 1;
+
+        float dir = s_tracker[idx].location.direction;
+        snprintf(buf, sizeof(buf), "航向 %.1f度", dir);
+        fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+
         /* 操作员位置 */
-        if (s_tracker[idx].system.operator_latitude != 0 ||
-            s_tracker[idx].system.operator_longitude != 0) {
-            y += 2;
-            fb_text(4, y, "操作员位置", C_GREEN); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].system.operator_latitude);
-            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].system.operator_longitude);
-            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
-        }
+        double plat = s_tracker[idx].system.operator_latitude;
+        double plon = s_tracker[idx].system.operator_longitude;
+        y += 1;
+        fb_text(4, y, "操作员位置", C_GREEN); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "  %.6f", plat);
+        fb_text(4, y, buf, plat != 0 ? C_LTGRAY : C_GRAY); y += FONT_LINE_H + 1;
+        snprintf(buf, sizeof(buf), "  %.6f", plon);
+        fb_text(4, y, buf, plon != 0 ? C_LTGRAY : C_GRAY); y += FONT_LINE_H + 1;
     }
 
     y += 2;
@@ -1036,19 +1035,28 @@ static void refresh_task(void *arg)
                     s_page = LCD_PAGE_HOME;
                 }
             } else {
-                /* 主页：User短按=进入模拟配置，长按=进模拟状态；Boot短按=进入列表 */
+                /* 主页按键逻辑（lcdfix14 优化）：
+                 *   User短按 = 列表（有目标进列表，无目标提示扫描中）
+                 *   User长按 = 模拟配置（手动进入模拟器）
+                 *   Boot短按 = 列表（有目标进列表，无目标停在主页提示）
+                 *   Boot长按 = 模拟配置
+                 * 这样不会因为没目标就误进模拟器，模拟器需要明确长按才能进入。 */
                 if (key == LCD_KEY_NEXT) {
+                    if (active > 0) {
+                        s_page = LCD_PAGE_LIST;
+                    }
+                    /* 无目标时停留在主页（状态栏会显示"搜索中"） */
+                } else if (key == LCD_KEY_PREV) {
                     s_page = LCD_PAGE_SIM_CONFIG;
                     s_scroll_offset = 0;
-                } else if (key == LCD_KEY_PREV) {
-                    if (s_sim_info.is_sim_running) s_page = LCD_PAGE_SIM_STATUS;
-                    else s_page = LCD_PAGE_SIM_CONFIG;
-                    s_scroll_offset = 0;
                 } else if (key == LCD_KEY_SELECT) {
-                    s_page = active > 0 ? LCD_PAGE_LIST : LCD_PAGE_SIM_CONFIG;
-                    s_scroll_offset = 0;
+                    if (active > 0) {
+                        s_page = LCD_PAGE_LIST;
+                    }
+                    /* 无目标时停留在主页 */
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_HOME;
+                    s_page = LCD_PAGE_SIM_CONFIG;
+                    s_scroll_offset = 0;
                 }
             }
         }
@@ -1062,19 +1070,39 @@ static void refresh_task(void *arg)
  * ================================================================ */
 static void enter_deep_sleep(void)
 {
-    ESP_LOGW(TAG, "=== 进入深度睡眠 ===");
+    ESP_LOGW(TAG, "=== 进入轻睡眠（按键唤醒）===");
 
     /* 关闭背光 */
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 
-    vTaskDelay(pdMS_TO_TICKS(100));
+    /* lcdfix14：原来用 deep sleep，但 GPIO0(Boot strapping pin) 作为唤醒源时
+     * 会因 strapping 状态导致芯片进入下载模式而非正常启动，且 deep sleep 等于
+     * 冷启动，所有状态丢失、重启画面像关机。改为 light sleep：
+     *  - CPU 暂停、WiFi/BLE 保持（可继续侦测）
+     *  - 任意按键低电平唤醒，立即回到原画面
+     *  - 不复位、不重启，体感跟手机锁屏一致 */
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_LOW_LEVEL,
+    };
+    gpio_config(&io_conf);
 
-    /* 配置 User 键(GPIO0) + Boot 键(GPIO28) 作为唤醒源：任意低电平唤醒 */
+    /* 同时配置 ext1 唤醒源（light sleep 下 GPIO0 已通过 rtc_gpio 初始化过，
+     * 用 ANY_LOW 触发；避免用 deep_sleep）*/
     esp_sleep_enable_ext1_wakeup((1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
                                   ESP_EXT1_WAKEUP_ANY_LOW);
+    esp_light_sleep_start();
 
-    esp_deep_sleep_start();
+    /* 唤醒后恢复背光和 GPIO 轮询配置 */
+    ESP_LOGI(TAG, "Woken from light sleep");
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    s_display_off = false;
 }
 
 /* ================================================================
