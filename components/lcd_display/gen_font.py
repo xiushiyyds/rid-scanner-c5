@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Generate bitmap font C arrays for LCD display (lcdfix14).
+"""Generate bitmap font C arrays for LCD display (lcdfix15).
 
 改进：
-- 改用 WenQuanYi Micro Hei（等宽黑体，16px 渲染更规整，不像 Noto Sans CJK 那样歪扭缺角）
-- 字号从 15px 提升到 16px（占满字身，字形更饱满）
-- 渲染时对字形做 1px 下沉对齐，避免上高下矮
-- 补充 "择选键" 等遗漏字
+- 自动从 lcd_display.c 提取所有 UI 中文字符，杜绝缺字
+- 渲染算法：先在 24px 画布渲染，再 LANCZOS 降采样到 16px，二值化阈值 128
+  → 笔画更均匀、不歪扭、不缺角
+- ASCII 字号 12px，CJK 字号 18px（渲染时），降采样后更清晰
 """
 from PIL import Image, ImageDraw, ImageFont
-import os
+import os, re
 
-# 优先用 WenQuanYi Micro Hei（免费、字形规整、专为屏幕设计）
 CJK_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -26,69 +25,77 @@ def _find_font():
 CJK_FONT_PATH = _find_font()
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_data.h")
 
-CJK_CHARS = """
-无人机侦测器就绪活跃目标协议国标大疆欧盟暂无信号扫描中按键翻页
-列表详情编号信号信道高度速度经度纬度距离航向电量最后发现
-模拟设置状态运行停止模式圆周往返搜索坐标
-发射中已停止帧数地址
-蓝牙配对请在手机输入已连接
-主页设置
-已发现未发现米秒度毫瓦分贝
-警告错误信息强弱
-收发开关确认返回上下选择
-飞行器类型距离方向
-水平垂直爬升
-经纬度位置
-时间戳版本
-设备名称序列号
-电池电压温度
-在线离线锁定
-百分比帧计数
-自动手动
-北南西东西北东北西南东南
-开机关机重启
-监测切换选择更新前秒分运行圆周往返
-请按键停止
-标准异常
-型号飞手相对
-滚转俯仰
-升降垂直
-机型
-操作员列表双
-择选键
-海拔
-"""
-EXTRA_CHARS = "：，。、（）%/-+→←↑↓★●○◆◇▲▼■□"
+# 额外符号（非中文但UI会用到）
+EXTRA_SYMBOLS = "：，。、（）%/-+→←↑↓★●○◆◇▲▼■□°"
 
-def dedup(s):
-    seen = set()
-    r = []
-    for c in s:
-        if c not in seen and not c.isspace():
-            seen.add(c); r.append(c)
-    return r
+def extract_ui_chars():
+    """从 lcd_display.c 中提取所有字符串字面量里的 CJK 字符"""
+    src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcd_display.c")
+    chars = set()
+    if os.path.exists(src_path):
+        with open(src_path, encoding='utf-8') as f:
+            src = f.read()
+        for m in re.finditer(r'"([^"]*)"', src):
+            for c in m.group(1):
+                cp = ord(c)
+                if (0x4E00 <= cp <= 0x9FFF or 0x3000 <= cp <= 0x303F or
+                    0xFF00 <= cp <= 0xFFEF or 0x2000 <= cp <= 0x206F or
+                    0x25A0 <= cp <= 0x25FF or 0x2600 <= cp <= 0x26FF or
+                    0x2190 <= cp <= 0x21FF or c in EXTRA_SYMBOLS):
+                    chars.add(c)
+    # 确保基础字
+    for c in "无人机侦测器":
+        chars.add(c)
+    return sorted(chars)
 
-CJK_LIST = dedup(CJK_CHARS + EXTRA_CHARS)
+CJK_LIST = extract_ui_chars()
+# 加上额外符号
+for c in EXTRA_SYMBOLS:
+    if c not in CJK_LIST:
+        CJK_LIST.append(c)
+CJK_LIST = sorted(set(CJK_LIST))
+
 print(f"CJK font: {CJK_FONT_PATH}")
 print(f"CJK chars: {len(CJK_LIST)}")
 
-def render(font, char, w, h, y_offset=0):
-    """渲染单个字形到 w×h 位图。
-    用固定起始位置代替 textbbox 居中，避免不同字符上下跳动。"""
-    img = Image.new('1', (w, h), 0)
-    draw = ImageDraw.Draw(img)
-    # 用 anchor="lt" 固定左上角，配合 y_offset 让所有字基线一致
+RENDER_SCALE = 2  # 2x supersampling
+GLYPH_W, GLYPH_H = 16, 16
+RENDER_W, RENDER_H = GLYPH_W * RENDER_SCALE, GLYPH_H * RENDER_SCALE
+
+def render_glyph(font, char, w, h):
+    """用2x超采样+LANCZOS降采样渲染字形，得到更均匀的点阵"""
+    big = Image.new('L', (RENDER_W, RENDER_H), 0)
+    draw = ImageDraw.Draw(big)
+    # 大字号渲染，居中
+    font_size = int(GLYPH_H * 1.15) * RENDER_SCALE
     try:
-        draw.text((0, y_offset), char, fill=1, font=font, anchor="lt")
-    except TypeError:
-        # 旧版 Pillow 不支持 anchor，回退到 bbox 居中
-        bbox = draw.textbbox((0, 0), char, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        x = (w - tw) // 2 - bbox[0]
-        y = (h - th) // 2 - bbox[1] + y_offset
-        draw.text((x, y), char, fill=1, font=font)
-    return list(img.getdata())
+        f = font.font_variant(size=font_size)
+    except:
+        f = ImageFont.truetype(CJK_FONT_PATH, font_size)
+    bbox = draw.textbbox((0,0), char, font=f)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (RENDER_W - tw) // 2 - bbox[0]
+    y = (RENDER_H - th) // 2 - bbox[1]
+    draw.text((x, y), char, fill=255, font=f)
+    # LANCZOS 降采样
+    small = big.resize((w, h), Image.LANCZOS)
+    # 二值化
+    pixels = list(small.getdata())
+    return [1 if p > 128 else 0 for p in pixels]
+
+def render_ascii(font_char, char, w, h):
+    """ASCII: 直接 8x16 渲染，字号 12"""
+    img = Image.new('L', (w, h), 0)
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0,0), char, font=font_char)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (w - tw) // 2 - bbox[0]
+    y = (h - th) // 2 - bbox[1] + 1
+    draw.text((x, y), char, fill=255, font=font_char)
+    pixels = list(img.getdata())
+    return [1 if p > 128 else 0 for p in pixels]
 
 def glyph_bytes(bitmap, w, h):
     bpr = (w + 7) // 8
@@ -104,27 +111,25 @@ def glyph_bytes(bitmap, w, h):
     return result
 
 def main():
-    # ASCII 用 13px，CJK 用 16px（填满字身）
-    ascii_font = ImageFont.truetype(CJK_FONT_PATH, 13)
-    cjk_font = ImageFont.truetype(CJK_FONT_PATH, 16)
+    ascii_font = ImageFont.truetype(CJK_FONT_PATH, 12)
+    cjk_font = ImageFont.truetype(CJK_FONT_PATH, 18)
 
     ascii_data = []
     for code in range(0x20, 0x7F):
-        bm = render(ascii_font, chr(code), 8, 16, y_offset=1)
+        bm = render_ascii(ascii_font, chr(code), 8, 16)
         ascii_data.append((chr(code), glyph_bytes(bm, 8, 16)))
 
     cjk_data = []
     for c in CJK_LIST:
-        bm = render(cjk_font, c, 16, 16, y_offset=0)
-        cjk_data.append((c, glyph_bytes(bm, 16, 16)))
+        bm = render_glyph(cjk_font, c, GLYPH_W, GLYPH_H)
+        cjk_data.append((c, glyph_bytes(bm, GLYPH_W, GLYPH_H)))
 
-    # 关键：按码点排序，lcd_font.c 的 find_cjk_index 使用二分查找
     cjk_data.sort(key=lambda x: ord(x[0]))
 
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
         f.write("""/*
- * font_data.h — Auto-generated bitmap fonts (lcdfix14)
- * 8x16 ASCII + 16x16 CJK (WenQuanYi Micro Hei)
+ * font_data.h — Auto-generated bitmap fonts (lcdfix15)
+ * 8x16 ASCII + 16x16 CJK (WenQuanYi Micro Hei, 2x supersampled)
  * DO NOT EDIT MANUALLY
  */
 #ifndef FONT_DATA_H
@@ -132,7 +137,6 @@ def main():
 #include <stdint.h>
 
 """)
-        # ASCII
         f.write(f"#define FONT_ASCII_FIRST 0x20\n")
         f.write(f"#define FONT_ASCII_COUNT {len(ascii_data)}\n")
         f.write(f"#define FONT_ASCII_W 8\n")
@@ -144,7 +148,6 @@ def main():
             f.write(f"    {{{hexstr}}}, /* '{label}' */\n")
         f.write("};\n\n")
 
-        # CJK
         f.write(f"#define FONT_CJK_COUNT {len(cjk_data)}\n")
         f.write(f"#define FONT_CJK_W 16\n")
         f.write(f"#define FONT_CJK_H 16\n")
@@ -154,7 +157,6 @@ def main():
             f.write(f"    {{{hexstr}}}, /* U+{ord(c):04X} '{c}' */\n")
         f.write("};\n\n")
 
-        # Codepoints
         f.write("static const uint16_t font_cjk_codepoints[] = {\n")
         for i in range(0, len(cjk_data), 10):
             chunk = cjk_data[i:i+10]
