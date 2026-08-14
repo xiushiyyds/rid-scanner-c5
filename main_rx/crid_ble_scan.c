@@ -209,18 +209,53 @@ static int ble_scan_gap_event(struct ble_gap_event *event, void *arg) {
  * ================================================================ */
 static int start_scan(void) {
     /*
-     * lcdfix10：优先使用 Legacy 扫描，提高与手机 BLE 广播的兼容性。
-     * Extended scanning 在某些控制器版本上会与 legacy advertising
-     * 产生资源争用，导致本机广播不可见。先确保 Legacy 稳定，后续有
-     * Long Range 需求再切换。
+     * lcdfix19：恢复 Extended Advertising 扫描（BT5 Coded PHY / Long Range）。
+     * RID 肩灯测试模块走 BLE 5 Long Range 广播，Legacy scan 收不到。
+     * Extended scan 同时覆盖 1M PHY 和 Coded PHY，Legacy 设备也能收到。
+     * 若控制器不支持 ext_disc，自动回退到 Legacy scan。
+     *
+     * lcdfix17: BLE 扫描占空比 50%（itvl=96/window=48），
+     * 给 WiFi 留足空口收 Beacon，又保证 BLE 广告接收稳定。
      */
-    /* lcdfix17: BLE 扫描占空比调到 50%。
-     * lcdfix16 的 30% (itvl=160/window=48) 在某些环境下窗口太短，
-     * 37/38/39 三个广告信道轮询一周容易错过。改为 itvl=96(60ms)/window=48(30ms)，
-     * 50% 占空比，既给 WiFi 留足空口收 Beacon，又保证 BLE 广告接收稳定。 */
     struct ble_gap_disc_params disc_params = {0};
     int rc;
 
+#if MYNEWT_VAL(BLE_EXT_ADV)
+    struct ble_gap_ext_disc_params uncoded_params = {0};
+    struct ble_gap_ext_disc_params coded_params = {0};
+
+    /* 1M PHY: 50% 占空比，96*0.625ms=60ms 间隔，48*0.625ms=30ms 窗口 */
+    uncoded_params.itvl = 96;
+    uncoded_params.window = 48;
+    uncoded_params.passive = 1;
+
+    /* Coded PHY (Long Range, S=8): 同样 50% 占空比 */
+    coded_params.itvl = 96;
+    coded_params.window = 48;
+    coded_params.passive = 1;
+
+    rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC,
+                          0,      /* duration: 连续 */
+                          0,      /* period: 连续 */
+                          0,      /* filter_duplicates: 关闭 */
+                          0,      /* filter_policy: 不过滤 */
+                          0,      /* limited: 0 (general discovery) */
+                          &uncoded_params,  /* 1M PHY */
+                          &coded_params,    /* Coded PHY (Long Range) */
+                          ble_scan_gap_event, NULL);
+
+    if (rc == 0) {
+        s_ext_adv_type = 1;
+        ESP_LOGI(TAG, "BLE Extended scan started (1M + Coded PHY, Long Range)");
+        return 0;
+    }
+
+    ESP_LOGW(TAG, "Extended scan failed (%d), falling back to legacy", rc);
+#else
+    ESP_LOGI(TAG, "BLE_EXT_ADV not enabled, using legacy scan");
+#endif
+
+    /* 回退到 Legacy 扫描 */
     memset(&disc_params, 0, sizeof(disc_params));
     disc_params.itvl = 96;            /* 96 × 0.625ms = 60ms */
     disc_params.window = 48;          /* 48 × 0.625ms = 30ms */

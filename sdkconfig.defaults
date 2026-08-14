@@ -10,10 +10,11 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 # Observer 角色是 BLE 扫描（ble_gap_disc）所必需的
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 
-# lcdfix10：关闭 BLE 5 Extended Advertising，使用 Legacy advertising
-# 提高与手机的兼容性，避免 controller 在 ext_adv + legacy_scan 组合下异常
-# CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT is not set
-# CONFIG_BT_NIMBLE_EXT_ADV is not set
+# lcdfix19：恢复 BLE 5 Extended Advertising 支持。
+# RID 肩灯测试模块走 BLE 5 Coded PHY (Long Range) 广播，
+# 没有 EXT_ADV 就收不到。同时保留 Legacy 回退。
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+CONFIG_BT_NIMBLE_EXT_ADV=y
 
 # lcdfix10：NimBLE 内存改回内部 SRAM。
 # 之前放 PSRAM 在 C5 上可能导致 controller 访问延迟/不稳定，
