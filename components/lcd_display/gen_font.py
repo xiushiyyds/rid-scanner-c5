@@ -79,6 +79,9 @@ def main():
         bm = render(cjk_font, c, 16, 16)
         cjk_data.append((c, glyph_bytes(bm, 16, 16)))
 
+    # 关键：按码点排序，lcd_font.c 的 find_cjk_index 使用二分查找
+    cjk_data.sort(key=lambda x: ord(x[0]))
+
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
         f.write("""/*
  * font_data.h — Auto-generated bitmap fonts
