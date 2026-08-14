@@ -77,6 +77,12 @@ bool crid_ble_is_paired(void);
  */
 void crid_ble_reset_pair(void);
 
+/**
+ * lcdfix15: 延迟重启 BLE RID 扫描
+ * BLE 连接/断开后 controller 可能停止扫描，调用此函数安全重启。
+ */
+void crid_ble_delayed_scan_restart(uint32_t delay_ms);
+
 #ifdef __cplusplus
 }
 #endif
