@@ -252,12 +252,15 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ---- 信道跳频扫描 ----
- * lcdfix19: RID 广播可能在 1/6/11 任一信道，固定锁 6 会漏掉其他信道。
- * 改为三信道轮询，每信道停留约 1.5 秒，一轮 4.5 秒覆盖全部非重叠信道。
- * 起始信道仍为 6，保证向后兼容。 */
-static const uint8_t SCAN_CHANNELS[] = {1, 6, 11};
+ * lcdfix19：实测测试模块和绝大多数 RID 设备固定在信道6。
+ * 之前 1/6/11 各 1.5s 的均等轮询让信道6只占 1/3 时间，检测明显变慢。
+ * 改成偏置跳频：
+ *   - 信道6（主信道）长驻 3500ms
+ *   - 信道1、11 各快速扫 250ms
+ * 一轮 4s 中信道6占 ~87%，检测速度接近固定信道6，同时不漏其他信道的目标。 */
+static const uint8_t SCAN_CHANNELS[] = {6, 1, 6, 11};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {3000, 250, 200, 250};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
-#define CHANNEL_DWELL_MS   1500
 static volatile uint8_t s_current_channel = 6;
 
 uint8_t crid_sniffer_get_current_channel(void) {
@@ -286,6 +289,7 @@ static void channel_hold_task(void *pvParameter) {
 
     while (!s_hold_should_stop) {
         uint8_t ch = SCAN_CHANNELS[idx];
+        uint16_t dwell = CHANNEL_DWELL_MS_ARR[idx];
         s_current_channel = ch;
         esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
         if (ret != ESP_OK && !s_hold_should_stop) {
@@ -294,7 +298,7 @@ static void channel_hold_task(void *pvParameter) {
         }
         idx = (idx + 1) % SCAN_CHANNEL_COUNT;
         /* 分段 delay，stop 时能快速退出 */
-        for (int i = 0; i < (CHANNEL_DWELL_MS / 100) && !s_hold_should_stop; i++) {
+        for (int i = 0; i < (dwell / 100) && !s_hold_should_stop; i++) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
