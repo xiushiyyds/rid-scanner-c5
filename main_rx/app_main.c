@@ -719,6 +719,18 @@ static void gps_report_task(void *arg) {
     }
 }
 
+/* LCD 按键回调包装：sim_ble_start_handler 接受 count 参数，LCD 调用时传0 */
+static void lcd_sim_start_handler(void) {
+    sim_ble_start_handler(0);
+}
+static void lcd_sim_stop_handler(void) {
+    sim_ble_stop_handler();
+}
+static void lcd_sim_mode_handler(int mode) {
+    /* 用当前配置更新 mode */
+    sim_ble_config_handler(s_sim_config.base_lat, s_sim_config.base_lon,
+                           mode, (int)s_sim_config.channel, 0, 0);
+}
 
 void app_main(void) {
     // 0. 初始化 UART 数据端口（GPIO17 TX），用于输出 UAV 解析数据
@@ -779,6 +791,12 @@ void app_main(void) {
                                crid_tracker_get_mutex(),
                                MAX_TRACKED_UAVS);
         crid_ble_register_pair_display(lcd_display_show_pair_pin);
+        /* 注册 LCD 按键模拟器操作回调 */
+        lcd_display_register_sim_callbacks(
+            lcd_sim_start_handler,
+            lcd_sim_stop_handler,
+            lcd_sim_mode_handler
+        );
         json_debug("RID_MAIN", "LCD display ready (ST7789 170x320, full DMA)");
     } else {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
