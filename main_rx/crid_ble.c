@@ -310,16 +310,25 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             const char *status = "STATUS:targets:0,gps:searching\n";
             crid_ble_write_cb(status, strlen(status), NULL);
 
-            /* 请求更低的连接间隔以提高吞吐量 (7.5ms~15ms) */
+            /* lcdfix15: 不要请求短连接间隔！
+             * ESP32-C5 单天线，BLE 中心连接 + Observer 扫描并发时，
+             * 过短的连接间隔（7.5~15ms）会把扫描时间窗全部挤占，
+             * 导致收不到肩灯/无人机的 BLE RID 广播。
+             * 用宽松间隔 30~50ms，给扫描留足时间。 */
             struct ble_gap_upd_params params = {
-                .itvl_min = 6,  /* 7.5ms = 6x1.25ms */
-                .itvl_max = 12, /* 15ms = 12×1.25ms */
-                .latency = 0,
-                .supervision_timeout = 400,  /* 4秒 */
+                .itvl_min = 24,  /* 30ms */
+                .itvl_max = 40,  /* 50ms */
+                .latency = 1,    /* 允许跳过1个间隔，进一步释放扫描时间 */
+                .supervision_timeout = 400,
                 .min_ce_len = 0,
                 .max_ce_len = 0,
             };
             ble_gap_update_params(event->connect.conn_handle, &params);
+
+            /* lcdfix15: 连接建立后 controller 会自动停止 BLE 扫描，
+             * 必须延迟重启扫描，否则收不到肩灯 RID 广播。
+             * 不能在 host task 里 vTaskDelay，用单独任务。 */
+            crid_ble_delayed_scan_restart(1500);
         } else {
             g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             ESP_LOGE(TAG, "Connect failed (status=%d)", event->connect.status);
@@ -327,10 +336,12 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGE(TAG, "Disconnected (reason=0x%04x)", event->disconnect.reason);
+        ESP_LOGW(TAG, "Disconnected (reason=0x%04x)", event->disconnect.reason);
         g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        crid_ble_reset_pair();  /* v1.5: 断开时重置配对 */
+        crid_ble_reset_pair();
         ble_advertise_start();
+        /* 断开后重启 RID 扫描（connection 期间可能被 controller 停掉） */
+        crid_ble_delayed_scan_restart(500);
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -431,10 +442,22 @@ ble_advertise_start(void)
  * ================================================================ */
 static void ble_delayed_scan_task(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(800));
-    ESP_LOGI(TAG, "Starting BLE RID scan after advertising settle");
+    uint32_t delay_ms = (uint32_t)(intptr_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    ESP_LOGI(TAG, "Starting/restarting BLE RID scan (delay=%lu ms)", (unsigned long)delay_ms);
+    /* 先停再启：BLE 连接建立后 controller 会停掉扫描，
+     * crid_ble_scan_start() 内部有 s_scan_running 标志但 controller 状态
+     * 可能已经不同步，强制 cancel 后再启动 */
+    crid_ble_scan_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
     crid_ble_scan_start();
     vTaskDelete(NULL);
+}
+
+/* lcdfix15: 可在任意上下文调用（GAP事件/定时器），安全重启扫描 */
+void crid_ble_delayed_scan_restart(uint32_t delay_ms) {
+    xTaskCreate(ble_delayed_scan_task, "ble_scan_rst", 2048,
+                (void *)(intptr_t)delay_ms, 4, NULL);
 }
 
 /* ================================================================
@@ -474,7 +497,7 @@ ble_on_sync(void)
     /* 延迟启动 BLE RID 扫描（单独任务，不阻塞 NimBLE host）。
      * 给 advertising 800ms 稳定时间，避免控制器同时配置 adv+scan 的竞态。 */
     BaseType_t ok = xTaskCreate(ble_delayed_scan_task, "ble_delayed_scan",
-                                2048, NULL, 4, NULL);
+                                2048, (void *)(uintptr_t)800, 4, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "Failed to create delayed scan task, starting scan immediately");
         crid_ble_scan_start();
