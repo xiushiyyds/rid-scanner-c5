@@ -1000,3 +1000,4 @@ void lcd_display_command(const char *cmd) { (void)cmd; }
 int lcd_display_get_battery_voltage(uint16_t *v) {
     if (v) *v = 0;
     return -1;
+}
