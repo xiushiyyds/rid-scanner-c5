@@ -49,6 +49,14 @@ void lcd_display_set_sim_info(const sim_display_info_t *info) {
     if (info) memcpy(&s_sim_info, info, sizeof(s_sim_info));
 }
 
+void lcd_display_register_sim_callbacks(sim_action_cb_t start,
+                                         sim_action_cb_t stop,
+                                         sim_mode_cb_t cycle_mode) {
+    s_sim_start_cb = start;
+    s_sim_stop_cb = stop;
+    s_sim_mode_cb = cycle_mode;
+}
+
 /* ================================================================
  * 内部状态
  * ================================================================ */
@@ -75,6 +83,11 @@ static volatile int s_detail_sel = 0;  /* 详情页当前查看的目标序号 *
 static volatile bool s_display_off = false;  /* 熄屏/睡眠状态 */
 static volatile uint32_t s_last_activity_ms = 0;  /* 最后一次按键时间(ms) */
 static bool s_both_pressed = false;  /* 双键同按检测 */
+
+/* 模拟器操作回调（由 app_main 注册） */
+static sim_action_cb_t s_sim_start_cb = NULL;
+static sim_action_cb_t s_sim_stop_cb = NULL;
+static sim_mode_cb_t s_sim_mode_cb = NULL;
 
 #define DISPLAY_TIMEOUT_MS  60000  /* 60秒无操作自动熄屏 */
 #define PWR_BOTH_HOLD_MS    1500   /* 双键同按1.5秒关机 */
@@ -177,8 +190,8 @@ static int init_lcd(void)
     esp_lcd_panel_init(s_panel);
 
     /* 竖屏 170×320，set_gap(35,0)，与 LILYGO 官方 demo 一致。
-     * mirror(false,true) = 仅 Y 轴镜像（上下翻转），文字正向、logo在顶 */
-    esp_lcd_panel_mirror(s_panel, false, true);
+     * 无镜像：文字正向，LILYGO logo 在顶部（与 lcdfix7 真机验证一致） */
+    esp_lcd_panel_mirror(s_panel, false, false);
     esp_lcd_panel_invert_color(s_panel, true);
     esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
@@ -403,14 +416,33 @@ static uint16_t protocol_color(uint8_t proto)
 /* ================================================================
  * 状态栏
  * ================================================================ */
+/* ================================================================
+ * 状态栏（含电量图标）
+ * ================================================================ */
+static void draw_battery_icon(int x, int y, int pct, uint16_t color)
+{
+    /* 电池外框 16×8，正极 2×4 */
+    int w = 16, h = 8;
+    fb_drawrect(x, y, w, h, color);
+    fb_fillrect(x + w, y + 2, 2, h - 4, color);  /* 正极头 */
+    if (pct > 0) {
+        int fill_w = (w - 4) * pct / 100;
+        if (fill_w < 1) fill_w = 1;
+        uint16_t fc = (pct > 30) ? C_GREEN : (pct > 15 ? C_YELLOW : C_RED);
+        fb_fillrect(x + 2, y + 2, fill_w, h - 4, fc);
+    }
+}
+
 static void render_statusbar(int active_count, int channel)
 {
     fb_fillrect(0, 0, LCD_WIDTH, STATUSBAR_H, C_BLUE);
     fb_text(4, SB_TEXT_Y, "无人机侦测", C_WHITE);
 
     char buf[24];
-    snprintf(buf, sizeof(buf), "CH%d  %d机", channel, active_count);
-    fb_text_right(LCD_WIDTH - 4, SB_TEXT_Y, buf, C_CYAN);
+    snprintf(buf, sizeof(buf), "CH%d %d机", channel, active_count);
+    int tw = lcd_font_text_width(buf);
+    fb_text(LCD_WIDTH - 4 - tw - 24, SB_TEXT_Y, buf, C_CYAN);
+    draw_battery_icon(LCD_WIDTH - 20, (STATUSBAR_H - 8) / 2, 75, C_WHITE);
 }
 
 /* ================================================================
@@ -423,7 +455,7 @@ static void render_footer(lcd_page_t page)
         "Boot列表  双键关机",
         "User选择 Boot详情",
         "User切换 Boot返回",
-        "User翻页 Boot切换",
+        "User选项 Boot启停",
         "User翻页 长按返回",
     };
     int idx = (int)page;
@@ -513,7 +545,7 @@ static void render_list(void)
 
     if (count == 0) {
         fb_text_center(CONTENT_Y0 + 100, "未发现目标", C_GRAY);
-        fb_text_center(CONTENT_Y0 + 124, "User键翻页", C_DIM);
+        fb_text_center(CONTENT_Y0 + 124, "Boot键返回", C_DIM);
         return;
     }
 
@@ -587,7 +619,7 @@ static void render_list(void)
 }
 
 /* ================================================================
- * 详情页
+ * 详情页（重排，紧凑两列布局，显示完整飞行数据）
  * ================================================================ */
 static void render_detail(void)
 {
@@ -611,103 +643,130 @@ static void render_detail(void)
         return;
     }
 
-    int y = CONTENT_Y0 + 4;
+    int y = CONTENT_Y0 + 2;
     char buf[48];
 
-    /* 标题行：型号 + 序号 (x/N) */
+    /* 标题：型号 + (n/N) */
     char title_buf[48];
     int total_active = 0;
-    if (s_tracker && s_tracker_mutex) {
-        xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
-        for (int i = 0; i < s_max_uavs; i++)
-            if (s_tracker[i].active) total_active++;
-        xSemaphoreGive(s_tracker_mutex);
-    }
+    xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_max_uavs; i++)
+        if (s_tracker[i].active) total_active++;
+    xSemaphoreGive(s_tracker_mutex);
 
     if (s_tracker[idx].is_dji) {
-        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(60, 30, 0));
+        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(60, 30, 0));
         const char *model = s_tracker[idx].dji_model[0] ?
             s_tracker[idx].dji_model : "DJI Drone";
         snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", model, s_detail_sel + 1, total_active);
         fb_text_trunc(4, y, title_buf, C_ORANGE, LCD_WIDTH - 8);
     } else {
-        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(0, 30, 60));
-        snprintf(title_buf, sizeof(title_buf), "目标详情 (%d/%d)", s_detail_sel + 1, total_active);
+        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(0, 30, 60));
+        const char *id = s_tracker[idx].basic_id.uas_id[0] ?
+            s_tracker[idx].basic_id.uas_id : "RID";
+        snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", id, s_detail_sel + 1, total_active);
         fb_text_trunc(4, y, title_buf, C_CYAN, LCD_WIDTH - 8);
-    }
-    y += FONT_LINE_H + 8;
-
-    /* ID / SN — 截断到屏幕宽度 */
-    if (s_tracker[idx].is_dji && s_tracker[idx].dji_serial[0]) {
-        fb_text(4, y, "SN", C_GREEN);
-        fb_text_trunc(30, y, s_tracker[idx].dji_serial, C_WHITE, LCD_WIDTH - 34);
-    } else if (s_tracker[idx].basic_id.uas_id[0]) {
-        fb_text(4, y, "ID", C_GREEN);
-        fb_text_trunc(30, y, s_tracker[idx].basic_id.uas_id, C_WHITE, LCD_WIDTH - 34);
     }
     y += FONT_LINE_H + 4;
 
-    /* 信号 */
-    fb_text(4, y, "信号", C_GREEN);
-    draw_signal_bars(38, y + 2, s_tracker[idx].last_rssi, 5);
+    /* 第二行：信号条 + RSSI + 电量（两列） */
+    draw_signal_bars(4, y + 1, s_tracker[idx].last_rssi, 4);
     snprintf(buf, sizeof(buf), "%ddBm", s_tracker[idx].last_rssi);
-    fb_text(80, y, buf, C_WHITE);
-    y += FONT_LINE_H + 6;
+    fb_text(30, y, buf, C_CYAN);
+
+    if (s_tracker[idx].is_dji && s_tracker[idx].dji_battery > 0 && s_tracker[idx].dji_battery <= 100) {
+        snprintf(buf, sizeof(buf), "电量%d%%", s_tracker[idx].dji_battery);
+        fb_text_right(LCD_WIDTH - 4, y, buf, s_tracker[idx].dji_battery > 30 ? C_GREEN : C_RED);
+    }
+    y += FONT_LINE_H + 3;
 
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 6;
+    y += 4;
 
-    /* 位置信息 */
+    /* 飞行数据：坐标（经度/纬度）格式化为 0.000000，两列布局 */
     if (s_tracker[idx].is_dji) {
-        snprintf(buf, sizeof(buf), "纬度  %.6f", s_tracker[idx].dji_latitude);
-        fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-        snprintf(buf, sizeof(buf), "经度  %.6f", s_tracker[idx].dji_longitude);
-        fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-        snprintf(buf, sizeof(buf), "高度  %.1fm", s_tracker[idx].dji_altitude);
-        fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
-        snprintf(buf, sizeof(buf), "速度  %.1fm/s", s_tracker[idx].dji_speed_h);
-        fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
+        double lat = s_tracker[idx].dji_latitude;
+        double lon = s_tracker[idx].dji_longitude;
+        if (lat != 0 || lon != 0) {
+            snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
+            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "经度 %.6f", lon);
+            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
+        }
+        if (s_tracker[idx].dji_altitude != 0) {
+            snprintf(buf, sizeof(buf), "高度 %.1fm", s_tracker[idx].dji_altitude);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+        }
+        if (s_tracker[idx].dji_speed_h != 0) {
+            snprintf(buf, sizeof(buf), "速度 %.1fm/s", s_tracker[idx].dji_speed_h);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+        }
         if (s_tracker[idx].dji_heading >= 0) {
-            snprintf(buf, sizeof(buf), "航向  %.1f度", s_tracker[idx].dji_heading);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
+            snprintf(buf, sizeof(buf), "航向 %.1f度", s_tracker[idx].dji_heading);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+        }
+        /* 飞手位置 */
+        if (s_tracker[idx].dji_pilot_lat != 0 || s_tracker[idx].dji_pilot_lon != 0) {
+            y += 2;
+            fb_text(4, y, "飞手位置", C_GREEN); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].dji_pilot_lat);
+            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].dji_pilot_lon);
+            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
         }
     } else {
-        if (s_tracker[idx].location.latitude != 0) {
-            snprintf(buf, sizeof(buf), "纬度  %.6f", s_tracker[idx].location.latitude);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-            snprintf(buf, sizeof(buf), "经度  %.6f", s_tracker[idx].location.longitude);
-            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
+        /* 标准 RID */
+        double lat = s_tracker[idx].location.latitude;
+        double lon = s_tracker[idx].location.longitude;
+        if (lat != 0 || lon != 0) {
+            snprintf(buf, sizeof(buf), "纬度 %.6f", lat);
+            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "经度 %.6f", lon);
+            fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 1;
         }
         if ((int)s_tracker[idx].location.height != 0) {
-            snprintf(buf, sizeof(buf), "高度  %dm", (int)s_tracker[idx].location.height);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
+            snprintf(buf, sizeof(buf), "相对高 %.0fm", s_tracker[idx].location.height);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+        }
+        if (s_tracker[idx].location.altitude_geo != 0) {
+            snprintf(buf, sizeof(buf), "海拔 %.0fm", s_tracker[idx].location.altitude_geo);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
         }
         if (s_tracker[idx].location.speed_horizontal > 0) {
-            snprintf(buf, sizeof(buf), "速度  %.1fm/s", s_tracker[idx].location.speed_horizontal);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
+            snprintf(buf, sizeof(buf), "速度 %.1fm/s", s_tracker[idx].location.speed_horizontal);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
         }
         if (s_tracker[idx].location.direction != 0) {
-            snprintf(buf, sizeof(buf), "航向  %.1f度", s_tracker[idx].location.direction);
-            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
+            snprintf(buf, sizeof(buf), "航向 %.1f度", s_tracker[idx].location.direction);
+            fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
+        }
+        /* 操作员位置 */
+        if (s_tracker[idx].location.operator_latitude != 0 ||
+            s_tracker[idx].location.operator_longitude != 0) {
+            y += 2;
+            fb_text(4, y, "操作员位置", C_GREEN); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].location.operator_latitude);
+            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].location.operator_longitude);
+            fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
         }
     }
 
-    y += 4;
+    y += 2;
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 6;
+    y += 3;
 
-    /* MAC — 标签+值，标签占 4 字符宽(32px)，值从 36px 开始 */
+    /* 底部：MAC + 信道 + 更新时间（小字段落） */
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              s_tracker[idx].mac[0], s_tracker[idx].mac[1],
              s_tracker[idx].mac[2], s_tracker[idx].mac[3],
              s_tracker[idx].mac[4], s_tracker[idx].mac[5]);
     fb_text(4, y, "MAC", C_GREEN);
-    fb_text(34, y, buf, C_GRAY);
-    y += FONT_LINE_H + 2;
+    fb_text_trunc(30, y, buf, C_GRAY, LCD_WIDTH - 34);
+    y += FONT_LINE_H + 1;
 
-    snprintf(buf, sizeof(buf), "信道  %d", s_tracker[idx].last_channel & 0x7F);
+    snprintf(buf, sizeof(buf), "信道%d", s_tracker[idx].last_channel & 0x7F);
     fb_text(4, y, buf, C_GREEN);
-    y += FONT_LINE_H + 2;
 
     if (s_tracker[idx].last_seen_ms > 0) {
         uint32_t ago = (uint32_t)(esp_timer_get_time() / 1000 - s_tracker[idx].last_seen_ms) / 1000;
@@ -716,8 +775,7 @@ static void render_detail(void)
         else
             snprintf(buf, sizeof(buf), "%lu分%lu秒前",
                      (unsigned long)(ago / 60), (unsigned long)(ago % 60));
-        fb_text(4, y, "更新", C_GREEN);
-        fb_text(34, y, buf, C_LTGRAY);
+        fb_text_right(LCD_WIDTH - 4, y, buf, C_LTGRAY);
     }
 }
 
@@ -737,16 +795,16 @@ static void render_simconfig(void)
     fb_text_right(LCD_WIDTH - 4, y,
         s_sim_info.is_sim_running ? "运行中" : "已停止",
         s_sim_info.is_sim_running ? C_GREEN : C_GRAY);
-    y += FONT_LINE_H + 4;
+    y += FONT_LINE_H + 6;
 
-    fb_text(4, y, "模式", C_GREEN);
+    fb_text(4, y, "飞行模式", C_GREEN);
     const char *modes[] = {"圆周", "往返", "搜索"};
     int mi = s_sim_info.sim_flight_mode;
     if (mi < 0 || mi >= 3) mi = 0;
     fb_text_right(LCD_WIDTH - 4, y, modes[mi], C_YELLOW);
-    y += FONT_LINE_H + 4;
+    y += FONT_LINE_H + 6;
 
-    snprintf(buf, sizeof(buf), "信道  %d", s_sim_info.sim_channel);
+    snprintf(buf, sizeof(buf), "信道%d", s_sim_info.sim_channel);
     fb_text(4, y, buf, C_CYAN);
     y += FONT_LINE_H + 4;
 
@@ -757,16 +815,23 @@ static void render_simconfig(void)
     y += FONT_LINE_H + 8;
 
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 6;
+    y += 8;
 
-    snprintf(buf, sizeof(buf), "纬度  %.4f", s_sim_info.sim_lat);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "经度  %.4f", s_sim_info.sim_lon);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 8;
+    snprintf(buf, sizeof(buf), "纬度%.4f", s_sim_info.sim_lat);
+    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 4;
+    snprintf(buf, sizeof(buf), "经度%.4f", s_sim_info.sim_lon);
+    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 4;
+    snprintf(buf, sizeof(buf), "目标数%d", s_sim_info.sim_target_count);
+    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 12;
 
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
     y += 6;
-    fb_text(4, y, "Boot键切换模式", C_ORANGE);
+    fb_text(4, y, "User切换模式", C_LTGRAY);
+    y += FONT_LINE_H + 2;
+    if (s_sim_info.is_sim_running)
+        fb_text(4, y, "Boot键停止", C_ORANGE);
+    else
+        fb_text(4, y, "Boot键发射", C_GREEN);
 }
 
 /* ================================================================
@@ -941,17 +1006,49 @@ static void refresh_task(void *arg)
                     s_page = LCD_PAGE_HOME;
                     s_scroll_offset = 0;
                 }
+            } else if (s_page == LCD_PAGE_SIM_CONFIG) {
+                /* 模拟配置页：User短按=切换模式，Boot短按=启动/停止模拟；长按=返回主页 */
+                if (key == LCD_KEY_NEXT) {
+                    int new_mode = (s_sim_info.sim_flight_mode + 1) % 3;
+                    s_sim_info.sim_flight_mode = (uint8_t)new_mode;
+                    if (s_sim_mode_cb) s_sim_mode_cb(new_mode);
+                } else if (key == LCD_KEY_PREV) {
+                    int new_mode = (s_sim_info.sim_flight_mode + 2) % 3;
+                    s_sim_info.sim_flight_mode = (uint8_t)new_mode;
+                    if (s_sim_mode_cb) s_sim_mode_cb(new_mode);
+                } else if (key == LCD_KEY_SELECT) {
+                    if (s_sim_info.is_sim_running) {
+                        if (s_sim_stop_cb) s_sim_stop_cb();
+                    } else {
+                        if (s_sim_start_cb) s_sim_start_cb();
+                    }
+                } else if (key == LCD_KEY_BACK) {
+                    s_page = LCD_PAGE_HOME;
+                    s_scroll_offset = 0;
+                }
+            } else if (s_page == LCD_PAGE_SIM_STATUS) {
+                /* 模拟状态页：Boot短按=停止并返回，长按=主页 */
+                if (key == LCD_KEY_SELECT) {
+                    if (s_sim_info.is_sim_running && s_sim_stop_cb)
+                        s_sim_stop_cb();
+                    s_page = LCD_PAGE_HOME;
+                } else if (key == LCD_KEY_BACK) {
+                    s_page = LCD_PAGE_HOME;
+                }
             } else {
-                /* 其他页：User短按=切下一页，长按=上一页；Boot短按=进入列表 */
-                if (key == LCD_KEY_NEXT && s_page < LCD_PAGE_COUNT - 1) {
-                    s_page++;
+                /* 主页：User短按=进入模拟配置，长按=进模拟状态；Boot短按=进入列表 */
+                if (key == LCD_KEY_NEXT) {
+                    s_page = LCD_PAGE_SIM_CONFIG;
                     s_scroll_offset = 0;
-                } else if ((key == LCD_KEY_PREV || key == LCD_KEY_BACK) && s_page > LCD_PAGE_HOME) {
-                    s_page--;
+                } else if (key == LCD_KEY_PREV) {
+                    if (s_sim_info.is_sim_running) s_page = LCD_PAGE_SIM_STATUS;
+                    else s_page = LCD_PAGE_SIM_CONFIG;
                     s_scroll_offset = 0;
-                } else if (key == LCD_KEY_SELECT && active > 0) {
-                    s_page = LCD_PAGE_LIST;
+                } else if (key == LCD_KEY_SELECT) {
+                    s_page = active > 0 ? LCD_PAGE_LIST : LCD_PAGE_SIM_CONFIG;
                     s_scroll_offset = 0;
+                } else if (key == LCD_KEY_BACK) {
+                    s_page = LCD_PAGE_HOME;
                 }
             }
         }
@@ -1069,7 +1166,7 @@ static void button_poll_task(void *arg)
  * ================================================================ */
 int lcd_display_init(void)
 {
-    ESP_LOGI(TAG, "=== LCD 模块初始化（lcdfix10）===");
+    ESP_LOGI(TAG, "=== LCD 模块初始化（lcdfix13）===");
 
     if (init_framebuffer() != 0) return -1;
     if (init_lcd() != 0) return -1;
