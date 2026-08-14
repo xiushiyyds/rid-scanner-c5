@@ -171,6 +171,20 @@ void lcd_display_register_sim_callbacks(sim_action_cb_t start,
 int lcd_display_get_battery_voltage(uint16_t *voltage_mv);
 
 /**
+ * lcdfix16: GPS 状态提供回调。
+ *
+ * lcd_display 是独立 component，不能直接 #include "gps_module.h"
+ * （那会造成 main_rx ↔ lcd_display 组件循环依赖）。
+ * 由 app_main 注册一个轻量回调，LCD 需要绘制状态栏时调用它拿 GPS 快照。
+ * 返回 true 表示有有效定位，false 表示无定位/未接模块。
+ * 若 sats_out 非 NULL，写入卫星数。
+ */
+typedef bool (*lcd_gps_provider_cb_t)(double *lat, double *lon,
+                                       double *alt, int *sats_out);
+
+void lcd_display_register_gps_provider(lcd_gps_provider_cb_t cb);
+
+/**
  * 模拟器显示信息结构体（多目标版）
  */
 typedef struct {

@@ -560,11 +560,20 @@ esp_err_t sim_stop(void) {
 
     ESP_LOGI(TAG, "Stopping simulator (%d targets)...", s_sim_config.target_count);
 
-    /* 停止发射任务 */
+    /* lcdfix16: 先标记状态，再删 TX 任务，让任何还在发的帧知道我们要停了。
+     * 注意不能在 s_tx_task 自己内部调 sim_stop（自删），目前都是 mode_switch_task
+     * 外部调用，安全。 */
+    s_sim_state = SIM_STATE_STOPPED;
+
+    /* 停止发射任务。
+     * vTaskDelete 不会等待任务退出，TX 任务可能正在 esp_wifi_80211_tx
+     * 这个调用本身是阻塞且通常很快返回（<5ms），但为了保证 sim_wifi_deinit
+     * 时 TX 任务已经完全退出，这里先 delete 再短暂 delay。 */
     if (s_tx_task) {
         vTaskDelete(s_tx_task);
         s_tx_task = NULL;
     }
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     /* 停止 Wi-Fi AP */
     sim_wifi_deinit();
@@ -575,7 +584,6 @@ esp_err_t sim_stop(void) {
         s_targets[i].encode_cfg.longitude = 0;
     }
 
-    s_sim_state = SIM_STATE_STOPPED;
     ESP_LOGI(TAG, "Simulator stopped. Total TX: %u", (unsigned)s_tx_count);
     return ESP_OK;
 }

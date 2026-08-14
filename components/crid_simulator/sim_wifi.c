@@ -21,17 +21,28 @@ static const char *TAG = "SIM_WIFI";
 /* 当前信道（动态切换时记录） */
 static uint8_t s_current_channel = 6;
 
+/* lcdfix16: 记录 AP netif 是否已创建，避免每次 sim_wifi_init 都
+ * 调 esp_netif_create_default_wifi_ap() 造成 netif 对象泄漏。
+ * sniffer deinit 不会销毁 default netif，重复创建会让 AP 起不来。 */
+static esp_netif_t *s_ap_netif = NULL;
+
 esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
     esp_err_t ret;
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INITED) {
         ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    esp_netif_create_default_wifi_ap();
+    /* 只在第一次创建 AP netif，后续模式切换复用 */
+    if (s_ap_netif == NULL) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        if (s_ap_netif == NULL) {
+            ESP_LOGW(TAG, "esp_netif_create_default_wifi_ap returned NULL (may already exist)");
+        }
+    }
 
     wifi_config_t ap_config = { 0 };
     const char *ap_ssid = (ssid != NULL && ssid[0] != '\0') ? ssid : "NekolunaRID-SIM";
@@ -73,11 +84,9 @@ esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
 
     s_current_channel = channel;
 
-    ret = esp_wifi_set_promiscuous(true);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_promiscuous failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    /* lcdfix16: 移除这里的 esp_wifi_set_promiscuous(true)。
+     * AP 模式下不需要 promiscuous，之前开了也没注册回调，
+     * 反而可能让控制器状态异常。80211_tx 帧在 AP 模式下直接发送。 */
 
     ESP_LOGI(TAG, "Wi-Fi AP init OK: ch=%u, SSID=%s, tx_power=%d (0.25dBm) = %.1f dBm",
              channel, ap_config.ap.ssid, tx_power, tx_power * 0.25f);

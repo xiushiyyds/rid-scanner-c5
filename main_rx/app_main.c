@@ -117,7 +117,11 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     vTaskDelay(pdMS_TO_TICKS(200));
 
     crid_sniffer_deinit();
-    vTaskDelay(pdMS_TO_TICKS(300));
+    /* lcdfix16: 给 WiFi 控制器足够时间完全释放。
+     * esp_wifi_deinit() 是异步的，底层 controller 有时需要数百毫秒
+     * 才能真正退出，过早调 sim_wifi_init 的 esp_wifi_init 会因为
+     * 状态机还在 STOPPING 而失败或看门狗。500ms 足够稳定。 */
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     esp_err_t ret = sim_init();
     if (ret != ESP_OK) {
@@ -154,7 +158,9 @@ static esp_err_t switch_to_scan_mode(void) {
     ESP_LOGI("MODE", "Switching to SCAN mode...");
 
     sim_stop();
-    vTaskDelay(pdMS_TO_TICKS(300));
+    /* lcdfix16: sim_stop 内部已经 delay 100ms 等 TX 任务退出，
+     * 这里再给控制器一点时间从 AP 模式完全释放。 */
+    vTaskDelay(pdMS_TO_TICKS(400));
 
     esp_err_t ret = crid_sniffer_init();
     if (ret != ESP_OK) {
@@ -766,6 +772,19 @@ static void lcd_sim_mode_handler(int mode) {
                            mode, (int)s_sim_config.channel, 0, 0);
 }
 
+/* lcdfix16: 提供给 LCD 状态栏的 GPS 回调。
+ * 由 lcd_display 组件在渲染时调用，避免 lcd_display 反向依赖 gps_module。
+ * 返回 true=有有效定位，同时把经纬度/海拔/卫星数写回出参。 */
+static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_out) {
+    gps_data_t gd = gps_get_data();
+    bool fix = gd.valid && gd.fix_quality > 0;
+    if (lat) *lat = gd.latitude;
+    if (lon) *lon = gd.longitude;
+    if (alt) *alt = gd.altitude;
+    if (sats_out) *sats_out = gd.satellites;
+    return fix;
+}
+
 void app_main(void) {
     // 0. 初始化 UART 数据端口（GPIO17 TX），用于输出 UAV 解析数据
     uart_data_port_init();
@@ -777,7 +796,10 @@ void app_main(void) {
     sim_get_default_config(&s_sim_config);
     s_mode_mutex = xSemaphoreCreateMutex();
     s_mode_queue = xQueueCreate(4, sizeof(mode_msg_t));
-    xTaskCreatePinnedToCore(mode_switch_task, "mode_sw", 4096, NULL, 5, NULL, 0);
+    /* lcdfix16: 栈从 4096 扩到 8192。
+     * switch_to_simulate_mode 会同步调用 esp_wifi_init/deinit + NimBLE stop/start，
+     * 调用栈深，4096 会栈溢出撞 InterruptWatchdog，表现为按第二次才重启。 */
+    xTaskCreatePinnedToCore(mode_switch_task, "mode_sw", 8192, NULL, 5, NULL, 0);
     ESP_LOGI("RID_MAIN", "SIM config: lat=%.4f lon=%.4f ch=%u mode=%s targets=%d tx_power=%d",
              s_sim_config.base_lat, s_sim_config.base_lon,
              s_sim_config.channel, sim_flight_mode_name(s_sim_config.flight_mode),
@@ -833,6 +855,8 @@ void app_main(void) {
             lcd_sim_stop_handler,
             lcd_sim_mode_handler
         );
+        /* lcdfix16: 注册 GPS 状态提供回调（状态栏 GPS 图标用） */
+        lcd_display_register_gps_provider(lcd_gps_provider);
         json_debug("RID_MAIN", "LCD display ready (ST7789 170x320, full DMA)");
     } else {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");

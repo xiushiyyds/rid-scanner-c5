@@ -31,8 +31,6 @@
 #include "esp_timer.h"
 #include "driver/ledc.h"
 #include "esp_cache.h"
-#include "esp_sleep.h"
-#include "driver/rtc_io.h"
 #include "driver/gpio.h"
 #include "esp_intr_alloc.h"
 #include "driver/i2c.h"
@@ -83,6 +81,15 @@ static bool s_both_pressed = false;  /* 双键同按检测 */
 static sim_action_cb_t s_sim_start_cb = NULL;
 static sim_action_cb_t s_sim_stop_cb = NULL;
 static sim_mode_cb_t s_sim_mode_cb = NULL;
+
+/* lcdfix16: GPS 状态回调（由 app_main 注入，避免 lcd_display 组件
+ * 反向依赖 main_rx/gps_module.h 造成组件循环依赖）。
+ * 返回 true=有定位；输出经纬度/海拔/卫星数。 */
+static lcd_gps_provider_cb_t s_gps_provider_cb = NULL;
+
+void lcd_display_register_gps_provider(lcd_gps_provider_cb_t cb) {
+    s_gps_provider_cb = cb;
+}
 
 void lcd_display_register_sim_callbacks(sim_action_cb_t start,
                                          sim_action_cb_t stop,
@@ -356,6 +363,11 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
+static inline void fb_pixel(int x, int y, uint16_t c) {
+    if (x >= 0 && x < LCD_WIDTH && y >= 0 && y < LCD_HEIGHT)
+        s_fb[y * LCD_WIDTH + x] = c;
+}
+
 static void fb_fill(uint16_t c) {
     for (int i = 0; i < LCD_WIDTH * LCD_HEIGHT; i++) s_fb[i] = c;
 }
@@ -476,8 +488,45 @@ static uint16_t protocol_color(uint8_t proto)
  * 状态栏
  * ================================================================ */
 /* ================================================================
- * 状态栏（含电量图标）
+ * 状态栏（含 GPS 图标 + 电量图标）
  * ================================================================ */
+
+/* lcdfix16: 8x10 GPS 定位针图标
+ * 点阵设计：圆形针头 + 针尖朝下，1=有色，0=透明 */
+static const uint8_t GPS_ICON_W = 8, GPS_ICON_H = 10;
+static const uint8_t gps_icon_bits[] = {
+    0b00111100,
+    0b01111110,
+    0b11111111,
+    0b11111111,
+    0b11111111,
+    0b01111110,
+    0b00111100,
+    0b00011000,
+    0b00111100,
+    0b00111100,
+};
+
+static void draw_gps_icon(int x, int y, bool has_fix, int sats) {
+    /* 有定位绿色，无定位灰色；>=4 颗卫星显示绿色 */
+    uint16_t c = has_fix ? C_GREEN : C_GRAY;
+    for (int row = 0; row < GPS_ICON_H; row++) {
+        uint8_t bits = gps_icon_bits[row];
+        for (int col = 0; col < GPS_ICON_W; col++) {
+            if (bits & (0x80 >> col)) {
+                fb_pixel(x + col, y + row, c);
+            }
+        }
+    }
+    /* 卫星数（有定位才显示） */
+    if (has_fix && sats > 0) {
+        char s[4];
+        snprintf(s, sizeof(s), "%d", sats);
+        /* 图标 8px 宽，右侧画数字 */
+        fb_text(x + GPS_ICON_W + 1, y - 2, s, C_GREEN);
+    }
+}
+
 static void draw_battery_icon(int x, int y, int pct, uint16_t color)
 {
     /* 电池外框 16×8，正极 2×4 */
@@ -500,6 +549,21 @@ static void render_statusbar(int active_count, int channel)
     char buf[24];
     snprintf(buf, sizeof(buf), "CH%d %d机", channel, active_count);
     int tw = lcd_font_text_width(buf);
+
+    /* lcdfix16: GPS 图标 + 卫星状态（通过回调从 app_main 获取，
+     * 避免 lcd_display 组件直接 include main_rx/gps_module.h）。
+     * 没接GPS/未定位时灰色，定位后绿色+卫星数。 */
+    bool gps_fix = false;
+    int gps_sats = 0;
+    double dummy_lat, dummy_lon, dummy_alt;
+    if (s_gps_provider_cb) {
+        gps_fix = s_gps_provider_cb(&dummy_lat, &dummy_lon, &dummy_alt, &gps_sats);
+    }
+    int gps_right = LCD_WIDTH - 4 - tw;
+    int gps_icon_x = gps_right - (gps_fix ? 22 : 12);  /* 有卫星数时多留位置 */
+    if (gps_icon_x < 80) gps_icon_x = 80;
+    draw_gps_icon(gps_icon_x, (STATUSBAR_H - GPS_ICON_H) / 2, gps_fix, gps_sats);
+
     fb_text(LCD_WIDTH - 4 - tw - 40, SB_TEXT_Y, buf, C_CYAN);
 
     /* lcdfix15: 真实电量（AXP2602 I2C） */
@@ -1143,51 +1207,38 @@ static void refresh_task(void *arg)
 /* ================================================================
  * 按键轮询
  * ================================================================ */
-static void enter_deep_sleep(void)
+/* ================================================================
+ * 熄屏（lcdfix16 替换原来的 light sleep）
+ *
+ * 之前的 light sleep + gpio_wakeup_enable 在 ESP32-C5 + WiFi/BLE
+ * 同时运行的场景下不可靠（controller 持锁时按键事件被射频中断吞掉），
+ * 表现为"跟关机一样唤不醒"。
+ *
+ * 改为只关背光、CPU/RF/LCD 全部保持运行。button_poll_task 一直在轮询，
+ * 任意键 100% 秒唤醒。1.9 寸 IPS 背光占绝大头功耗，熄屏已经能省电。
+ *
+ * 调用方：双键同按 1.5 秒。进入此函数后会阻塞，直到任意键被按下并释放，
+ * 然后恢复背光返回。refresh_task 在 s_display_off=true 时会自动跳过重绘。
+ * ================================================================ */
+static void enter_display_off(void)
 {
-    ESP_LOGW(TAG, "=== 进入轻睡眠（GPIO 按键唤醒）===");
+    ESP_LOGW(TAG, "=== 熄屏（背光关，按键唤醒）===");
 
     /* 关闭背光 */
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 
-    /* lcdfix15 修复：lcdfix14 用了 esp_sleep_enable_ext1_wakeup()，
-     * 那是 deep sleep 的 RTC GPIO 唤醒源，在 light sleep 下
-     * ESP32-C5 不会按预期唤醒，所以"按任意键不恢复"。
-     * 正确方式：gpio_wakeup_enable() + esp_sleep_enable_gpio_wakeup()，
-     * 这是 light sleep 的数字 GPIO 唤醒，任意低电平立即唤醒。 */
+    s_display_off = true;
 
-    /* 先确保两个按键 GPIO 已配为输入+上拉 */
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
+    /* 阻塞等待按键唤醒（button_poll_task 里会把 s_display_off 置 false） */
+    while (s_display_off) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 
-    /* 配置 GPIO 唤醒源：任意一个按键拉低就唤醒 */
-    gpio_wakeup_enable(BTN_USER_PIN, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable(BTN_BOOT_PIN, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-
-    /* 进入 light sleep。CPU 暂停，WiFi/BLE/RAM 保持，
-     * 唤醒后从这里继续执行，不复位、不丢状态。 */
-    esp_light_sleep_start();
-
-    /* 唤醒原因可查，但这里直接恢复背光 */
-    ESP_LOGI(TAG, "Woken from light sleep by GPIO");
-
-    /* 清 GPIO 唤醒配置，避免影响正常轮询 */
-    gpio_wakeup_disable(BTN_USER_PIN);
-    gpio_wakeup_disable(BTN_BOOT_PIN);
-
-    /* 恢复背光 */
+    ESP_LOGI(TAG, "Woken from display-off by key");
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
     s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    s_display_off = false;
 }
 
 /* ================================================================
@@ -1196,7 +1247,7 @@ static void enter_deep_sleep(void)
  * 按键定义：
  *   User(GPIO0)：短按=NEXT，长按=PREV（在列表/详情=上下切换目标）
  *   Boot(GPIO28)：短按=SELECT（确认/进入），长按=BACK（返回主页）
- *   双键同按1.5秒=POWER（进入深度睡眠，按键唤醒）
+ *   双键同按1.5秒=熄屏（背光关，任意键唤醒）
  * ================================================================ */
 static void button_poll_task(void *arg)
 {
@@ -1220,15 +1271,24 @@ static void button_poll_task(void *arg)
                 t_user_down = now;
                 user_long_sent = false;
                 s_last_activity_ms = now;
+                /* 熄屏状态下任意键唤醒（等键释放后清标志，避免误触发操作） */
+                if (s_display_off) {
+                    while (gpio_get_level(BTN_USER_PIN) == 0 ||
+                           gpio_get_level(BTN_BOOT_PIN) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    s_display_off = false;
+                }
             } else if (!user_long_sent && (now - t_user_down > long_press)) {
-                if (!s_both_pressed)
+                if (!s_both_pressed && !s_display_off)
                     lcd_display_send_key(LCD_KEY_PREV);
                 user_long_sent = true;
             }
         } else if (user_down) {
-            if (!user_long_sent && (now - t_user_down > debounce)) {
-                if (!s_both_pressed)
-                    lcd_display_send_key(LCD_KEY_NEXT);
+            if (!user_long_sent && !s_both_pressed && !s_display_off &&
+                (now - t_user_down > debounce)) {
+                lcd_display_send_key(LCD_KEY_NEXT);
             }
             user_down = false;
         }
@@ -1240,31 +1300,42 @@ static void button_poll_task(void *arg)
                 t_boot_down = now;
                 boot_long_sent = false;
                 s_last_activity_ms = now;
+                if (s_display_off) {
+                    while (gpio_get_level(BTN_USER_PIN) == 0 ||
+                           gpio_get_level(BTN_BOOT_PIN) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    s_display_off = false;
+                }
             } else if (!boot_long_sent && (now - t_boot_down > long_press)) {
-                if (!s_both_pressed)
+                if (!s_both_pressed && !s_display_off)
                     lcd_display_send_key(LCD_KEY_BACK);
                 boot_long_sent = true;
             }
         } else if (boot_down) {
-            if (!boot_long_sent && (now - t_boot_down > debounce)) {
-                if (!s_both_pressed)
-                    lcd_display_send_key(LCD_KEY_SELECT);
+            if (!boot_long_sent && !s_both_pressed && !s_display_off &&
+                (now - t_boot_down > debounce)) {
+                lcd_display_send_key(LCD_KEY_SELECT);
             }
             boot_down = false;
         }
 
-        /* ---- 双键同按检测（关机） ---- */
+        /* ---- 双键同按检测（熄屏） ---- */
         if (user_lvl == 0 && boot_lvl == 0) {
             if (!s_both_pressed) {
                 s_both_pressed = true;
                 both_down_time = now;
             } else if (now - both_down_time > PWR_BOTH_HOLD_MS) {
-                /* 等待按键释放后再睡眠，避免立即唤醒 */
-                while (gpio_get_level(BTN_USER_PIN) == 0 || gpio_get_level(BTN_BOOT_PIN) == 0) {
+                /* 等按键释放后再熄屏，避免立即被同一次按下唤醒 */
+                while (gpio_get_level(BTN_USER_PIN) == 0 ||
+                       gpio_get_level(BTN_BOOT_PIN) == 0) {
                     vTaskDelay(pdMS_TO_TICKS(20));
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
-                enter_deep_sleep();
+                /* lcdfix16: 改为纯熄屏，不再 light sleep。
+                 * enter_display_off 内部会阻塞等待唤醒 */
+                enter_display_off();
             }
         } else {
             s_both_pressed = false;
