@@ -98,7 +98,7 @@ static int init_lcd(void)
         .sclk_io_num = LCD_PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 170 * 10 * 2 + 8,
+        .max_transfer_sz = LCD_WIDTH * LCD_HEIGHT * 2 + 8,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
 
@@ -137,10 +137,10 @@ static int init_lcd(void)
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_cfg, &s_panel));
 
     esp_lcd_panel_init(s_panel);
+    /* 与 LILYGO 官方 lcd.ino 一致：竖屏 170×320，无需 swap_xy */
     esp_lcd_panel_mirror(s_panel, true, false);
-    esp_lcd_panel_swap_xy(s_panel, true);
     esp_lcd_panel_invert_color(s_panel, true);
-    esp_lcd_panel_set_gap(s_panel, 0, 35);
+    esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
 
     ESP_LOGI(TAG, "LCD 初始化完成 %dx%d", LCD_WIDTH, LCD_HEIGHT);
@@ -198,16 +198,12 @@ static int init_framebuffer(void)
 static void flush_framebuffer(void)
 {
     if (!s_panel || !s_fb) return;
-    const int chunk = 10;
-    for (int y = 0; y < LCD_HEIGHT; y += chunk) {
-        int h = (y + chunk > LCD_HEIGHT) ? LCD_HEIGHT - y : chunk;
-        uint16_t *p = &s_fb[y * LCD_WIDTH];
-        size_t len = LCD_WIDTH * h * 2;
-        if (s_fb_in_psram) {
-            esp_cache_msync(p, len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        }
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_WIDTH, y + h, p);
+    /* 与 LILYGO 官方 demo 一致：一次性整块发送全屏帧缓冲。
+     * PSRAM DMA 需要在发送前做 cache 回写，保证 SPI 读到最新数据。 */
+    if (s_fb_in_psram) {
+        esp_cache_msync(s_fb, LCD_FB_SIZE, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     }
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb);
 }
 
 /* ================================================================
@@ -874,17 +870,24 @@ int lcd_display_init(void)
     if (init_lcd() != 0) return -1;
     init_backlight();
 
-    /* 开机纯色测试 */
+    /* 开机纯色测试：整屏填充，用于快速判断屏幕方向/满屏是否正常 */
     fb_fill(rgb565(0, 20, 50));
+    /* 四角画白色方块 + 屏幕中央画十字，方便肉眼确认满屏和方向 */
+    fb_fillrect(0, 0, 20, 20, C_WHITE);             /* 左上 */
+    fb_fillrect(LCD_WIDTH - 20, 0, 20, 20, C_WHITE);  /* 右上 */
+    fb_fillrect(0, LCD_HEIGHT - 20, 20, 20, C_WHITE); /* 左下 */
+    fb_fillrect(LCD_WIDTH - 20, LCD_HEIGHT - 20, 20, 20, C_WHITE); /* 右下 */
+    fb_fillrect(LCD_WIDTH/2 - 1, 0, 2, LCD_HEIGHT, C_WHITE); /* 垂直中线 */
+    fb_fillrect(0, LCD_HEIGHT/2 - 1, LCD_WIDTH, 2, C_WHITE); /* 水平中线 */
     flush_framebuffer();
-    vTaskDelay(pdMS_TO_TICKS(300));
+    vTaskDelay(pdMS_TO_TICKS(1500));
 
     /* 开机 Logo */
     fb_fill(C_BG);
     fb_text_center(130, "无人机侦测器", C_CYAN);
     fb_text_center(154, "T-Display-C5", C_GRAY);
     flush_framebuffer();
-    vTaskDelay(pdMS_TO_TICKS(800));
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     /* 按键 */
     gpio_config_t btn_cfg = {
