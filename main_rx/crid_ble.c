@@ -297,8 +297,11 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             g_nus_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected, conn_handle=%d", g_nus_conn_handle);
-            /* v1.5: 生成配对码并显示 */
-            generate_pair_pin();
+            /* 连接即授权：侦测设备无敏感数据，无需 PIN 配对 */
+            g_paired = true;
+            if (g_pair_display_cb) {
+                g_pair_display_cb("RID-Scanner");  /* 显示"蓝牙已连接"3秒 */
+            }
 
             /* 请求更低的连接间隔以提高吞吐量 (7.5ms~15ms) */
             struct ble_gap_upd_params params = {
