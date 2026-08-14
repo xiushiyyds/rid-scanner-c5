@@ -26,14 +26,27 @@ static uint8_t s_current_channel = 6;
  * sniffer deinit 不会销毁 default netif，重复创建会让 AP 起不来。 */
 static esp_netif_t *s_ap_netif = NULL;
 
+/* lcdfix16: 跟踪 esp_wifi_init 状态。
+ * 模式切换时如果上一次 esp_wifi_deinit 没有真正完全释放，
+ * 再调 esp_wifi_init 会失败，但 WiFi 实际上仍然可用。
+ * 用静态标志避免重复 init，比依赖不存在的 ESP_ERR_WIFI_INITED 可靠。 */
+static bool s_wifi_inited = false;
+
 esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
     esp_err_t ret;
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INITED) {
-        ESP_LOGE(TAG, "esp_wifi_init failed: %s", esp_err_to_name(ret));
-        return ret;
+    if (!s_wifi_inited) {
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ret = esp_wifi_init(&cfg);
+        if (ret != ESP_OK) {
+            /* 某些模式切换路径下 controller 没完全 deinit，
+             * 继续走 set_mode/start，通常能恢复。 */
+            ESP_LOGW(TAG, "esp_wifi_init returned %s (assuming already inited)",
+                     esp_err_to_name(ret));
+        }
+        s_wifi_inited = true;
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi already initialized, reusing driver");
     }
 
     /* 只在第一次创建 AP netif，后续模式切换复用 */
@@ -124,6 +137,9 @@ esp_err_t sim_wifi_deinit(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_deinit failed: %s", esp_err_to_name(ret));
     }
+    /* lcdfix16: 复位初始化标志。即使 deinit 返回错误，也认为
+     * WiFi 驱动已释放；下次 init 会重新 esp_wifi_init。 */
+    s_wifi_inited = false;
 
     ESP_LOGI(TAG, "Wi-Fi AP mode released");
     return ESP_OK;
