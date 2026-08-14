@@ -26,6 +26,11 @@
 #include "opendroneid.h"
 #include "dji_droneid.h"
 
+/* lcdfix16: 跟踪 sniffer 侧 esp_wifi_init 状态。
+ * ESP-IDF v5.5 中 esp_wifi_init 重复调用不返回 ESP_ERR_WIFI_INITED
+ * （该宏在部分版本中根本不存在），用静态标志更可靠。 */
+static bool s_sniffer_wifi_inited = false;
+
 /* ================================================================
  MAC 地址调试过滤器
  ================================================================ */
@@ -287,6 +292,7 @@ sniffer_stats_t *crid_sniffer_get_stats(void) {
 esp_err_t crid_sniffer_init(void) {
     memset(&g_stats, 0, sizeof(g_stats));
     char err[64];
+    esp_err_t ret;
 
     ESP_LOGI(TAG, "Initializing Wi-Fi Sniffer...");
 
@@ -303,15 +309,20 @@ esp_err_t crid_sniffer_init(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t ret = esp_wifi_init(&cfg);
-    /* lcdfix16: 模式切换时 WiFi 可能已处于 init 状态
-     * （sim_wifi_deinit 只 stop+deinit，但 default event loop 仍持有状态），
-     * 容忍 ESP_ERR_WIFI_INITED，不要当成致命错误。 */
-    if (ret != ESP_OK && ret != ESP_ERR_WIFI_INITED) {
-        snprintf(err, sizeof(err), "Wi-Fi init failed: %s", esp_err_to_name(ret));
-        json_error("RID_SNIFF", err);
-        return ret;
+    /* lcdfix16: 用静态标志跟踪 WiFi 初始化状态，
+     * 避免引用不存在的 ESP_ERR_WIFI_INITED 宏导致编译失败。 */
+    if (!s_sniffer_wifi_inited) {
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ret = esp_wifi_init(&cfg);
+        if (ret != ESP_OK) {
+            /* 模式切换路径下 controller 可能仍处于 init 状态，
+             * 记录警告但继续 set_mode/start，通常能恢复。 */
+            ESP_LOGW(TAG, "esp_wifi_init returned %s (reusing existing driver)",
+                     esp_err_to_name(ret));
+        }
+        s_sniffer_wifi_inited = true;
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi driver already initialized, reusing");
     }
 
     ret = esp_wifi_set_mode(WIFI_MODE_NULL);
@@ -413,6 +424,8 @@ esp_err_t crid_sniffer_deinit(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_deinit failed: %s", esp_err_to_name(ret));
     }
+    /* lcdfix16: 复位 WiFi 初始化标志，下次 sniffer init 重新 esp_wifi_init。 */
+    s_sniffer_wifi_inited = false;
 
     ESP_LOGI(TAG, "Sniffer stopped, Wi-Fi released");
     return ESP_OK;
