@@ -276,7 +276,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 
 static void channel_hold_task(void *pvParameter) {
     char msg[64];
-    snprintf(msg, sizeof(msg), "Channel hop started on 1/6/11 (dwell=%dms)", CHANNEL_DWELL_MS);
+    snprintf(msg, sizeof(msg), "Channel hop: ch6=3000ms, ch1/11=250ms (biased)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
