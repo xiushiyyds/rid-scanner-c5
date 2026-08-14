@@ -246,7 +246,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-/* ---- 信道保持任务 ---- */
+/* ---- 信道保持任务 ----
+ * lcdfix15: 增加 stop flag，deinit 时必须停掉任务，
+ * 否则切到模拟AP模式后它还在 esp_wifi_set_channel(6) 干扰AP。 */
+static volatile bool s_hold_should_stop = false;
+static TaskHandle_t s_hold_task_handle = NULL;
+
 static void channel_hold_task(void *pvParameter) {
     char msg[64];
     snprintf(msg, sizeof(msg), "Channel hold started, locked to channel %d", FIXED_CHANNEL);
@@ -254,14 +259,20 @@ static void channel_hold_task(void *pvParameter) {
 
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-    while (1) {
+    while (!s_hold_should_stop) {
         esp_err_t ret = esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
-        if (ret != ESP_OK) {
-            snprintf(msg, sizeof(msg), "Failed to set channel %d: %s", FIXED_CHANNEL, esp_err_to_name(ret));
+        if (ret != ESP_OK && !s_hold_should_stop) {
+            snprintf(msg, sizeof(msg), "set channel %d: %s", FIXED_CHANNEL, esp_err_to_name(ret));
             json_warning("RID_SNIFF", msg);
         }
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        /* 用分段 delay 代替长阻塞，stop 时能快速退出 */
+        for (int i = 0; i < 30 && !s_hold_should_stop; i++) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
+    s_hold_should_stop = false;  /* 复位，供下次 init 重新使用 */
+    s_hold_task_handle = NULL;
+    vTaskDelete(NULL);
 }
 
 /* ---- 公开接口 ---- */
@@ -348,12 +359,20 @@ esp_err_t crid_sniffer_init(void) {
 }
 
 void crid_sniffer_start_channel_hold(void) {
-    static TaskHandle_t s_hold_task = NULL;
-    if (s_hold_task != NULL) {
-        return;  /* 已启动，避免重复创建任务 */
+    if (s_hold_task_handle != NULL) {
+        /* 任务可能还在退出中，等它完成 */
+        for (int i = 0; i < 20 && s_hold_task_handle != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
+    s_hold_should_stop = false;
     xTaskCreate(channel_hold_task, "ch_hold",
-                CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, &s_hold_task);
+                CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, &s_hold_task_handle);
+}
+
+/* lcdfix15: 停止信道保持任务（切到模拟模式前必须调用） */
+void crid_sniffer_stop_channel_hold(void) {
+    s_hold_should_stop = true;
 }
 
 /**
@@ -363,7 +382,11 @@ void crid_sniffer_start_channel_hold(void) {
 esp_err_t crid_sniffer_deinit(void) {
     ESP_LOGI(TAG, "Stopping sniffer and releasing Wi-Fi...");
 
-    /* 停止混杂模式 */
+    /* lcdfix15: 先停信道保持任务，否则它在 wifi stop/deinit 后
+     * 还在 esp_wifi_set_channel 干扰模拟器 AP 模式 */
+    crid_sniffer_stop_channel_hold();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     esp_err_t ret = esp_wifi_set_promiscuous(false);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "set_promiscuous(false) failed: %s", esp_err_to_name(ret));
