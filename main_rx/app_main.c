@@ -770,14 +770,28 @@ void app_main(void) {
     esp_netif_init();
     esp_event_loop_create_default();
 
-    // 4. 初始化 Wi-Fi sniffer
+    // 4. 初始化 LCD 显示模块（必须在 WiFi/BLE 之前！）
+    //    108KB 全屏 DMA 帧缓冲必须从连续内部 SRAM 分配，
+    //    WiFi/BT 协议栈会占用并碎片化内部 SRAM，之后就分配不到了。
+    //    lcdfix10：如果 LCD 初始化失败，后续仍可正常工作（串口输出）。
+    if (lcd_display_init() == 0) {
+        lcd_display_set_source(crid_tracker_get_table(),
+                               crid_tracker_get_mutex(),
+                               MAX_TRACKED_UAVS);
+        crid_ble_register_pair_display(lcd_display_show_pair_pin);
+        json_debug("RID_MAIN", "LCD display ready (ST7789 170x320, full DMA)");
+    } else {
+        json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
+    }
+
+    // 5. 初始化 Wi-Fi sniffer（在 LCD 之后，避免 SRAM 被 WiFi 抢占）
     ret = crid_sniffer_init();
     if (ret != ESP_OK) {
         json_error("RID_MAIN", "Sniffer init failed!");
         return;
     }
 
-    // 5. 初始化 BLE NUS (NimBLE，内存分配在 SPIRAM)
+    // 6. 初始化 BLE NUS (NimBLE，内存分配在 SPIRAM)
     ret = crid_ble_init();
     if (ret != ESP_OK) {
         json_warning("RID_MAIN", "BLE init failed (non-fatal)");
@@ -796,23 +810,6 @@ void app_main(void) {
         // 实际扫描在 NimBLE host sync 后由 crid_ble.c 的 sync 回调触发
         crid_ble_scan_init();
         json_debug("RID_MAIN", "BLE RID scanner initialized (will start on host sync)");
-    }
-
-    // 6. 初始化 LCD 显示模块（ST7789 + SPI）
-    if (lcd_display_init() == 0) {
-        // 绑定追踪表数据源
-        lcd_display_set_source(crid_tracker_get_table(),
-                               crid_tracker_get_mutex(),
-                               MAX_TRACKED_UAVS);
-
-        // 注册BLE配对码显示回调
-        crid_ble_register_pair_display(lcd_display_show_pair_pin);
-
-        // 按键轮询已由 lcd_display 模块内部处理（T-Display-C5 自带按键）
-        
-        json_debug("RID_MAIN", "LCD display ready (ST7789 240x320)");
-    } else {
-        json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
     }
 
     // 7. 创建任务
