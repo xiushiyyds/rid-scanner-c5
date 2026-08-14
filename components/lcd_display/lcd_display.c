@@ -31,6 +31,8 @@
 #include "esp_timer.h"
 #include "driver/ledc.h"
 #include "esp_cache.h"
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
 
 #ifndef FIXED_CHANNEL
 #define FIXED_CHANNEL 6
@@ -69,6 +71,13 @@ static int s_max_uavs = 0;
 static volatile lcd_page_t s_page = LCD_PAGE_HOME;
 static volatile int s_selection = 0;
 static volatile int s_scroll_offset = 0;
+static volatile int s_detail_sel = 0;  /* 详情页当前查看的目标序号 */
+static volatile bool s_display_off = false;  /* 熄屏/睡眠状态 */
+static volatile uint32_t s_last_activity_ms = 0;  /* 最后一次按键时间(ms) */
+static bool s_both_pressed = false;  /* 双键同按检测 */
+
+#define DISPLAY_TIMEOUT_MS  60000  /* 60秒无操作自动熄屏 */
+#define PWR_BOTH_HOLD_MS    1500   /* 双键同按1.5秒关机 */
 
 /* ================================================================
  * 配色方案（深色主题）
@@ -411,9 +420,9 @@ static void render_footer(lcd_page_t page)
 {
     fb_fillrect(0, CONTENT_Y1, LCD_WIDTH, FOOTER_H, rgb565(20, 30, 20));
     const char *hints[] = {
-        "User下翻 长按上翻",
-        "User翻页 Boot详情",
-        "Boot返回列表",
+        "Boot列表  双键关机",
+        "User选择 Boot详情",
+        "User切换 Boot返回",
         "User翻页 Boot切换",
         "User翻页 长按返回",
     };
@@ -585,7 +594,7 @@ static void render_detail(void)
     if (!s_tracker || !s_tracker_mutex) return;
 
     int idx = -1;
-    int sel = s_selection;
+    int sel = s_detail_sel;
     int active_idx = 0;
 
     xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
@@ -605,15 +614,26 @@ static void render_detail(void)
     int y = CONTENT_Y0 + 4;
     char buf[48];
 
-    /* 标题行 */
+    /* 标题行：型号 + 序号 (x/N) */
+    char title_buf[48];
+    int total_active = 0;
+    if (s_tracker && s_tracker_mutex) {
+        xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
+        for (int i = 0; i < s_max_uavs; i++)
+            if (s_tracker[i].active) total_active++;
+        xSemaphoreGive(s_tracker_mutex);
+    }
+
     if (s_tracker[idx].is_dji) {
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(60, 30, 0));
         const char *model = s_tracker[idx].dji_model[0] ?
             s_tracker[idx].dji_model : "DJI Drone";
-        fb_text_trunc(4, y, model, C_ORANGE, LCD_WIDTH - 8);
+        snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", model, s_detail_sel + 1, total_active);
+        fb_text_trunc(4, y, title_buf, C_ORANGE, LCD_WIDTH - 8);
     } else {
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 6, rgb565(0, 30, 60));
-        fb_text(4, y, "目标详情", C_CYAN);
+        snprintf(title_buf, sizeof(title_buf), "目标详情 (%d/%d)", s_detail_sel + 1, total_active);
+        fb_text_trunc(4, y, title_buf, C_CYAN, LCD_WIDTH - 8);
     }
     y += FONT_LINE_H + 8;
 
@@ -825,7 +845,27 @@ static void render_pair_overlay(void)
  * ================================================================ */
 static void refresh_task(void *arg)
 {
+    s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
     while (1) {
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+        /* 熄屏时仅轮询按键，不渲染，省电流畅 */
+        if (s_display_off) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        /* 60秒无操作自动熄屏（背光关、画面保持） */
+        if (now - s_last_activity_ms > DISPLAY_TIMEOUT_MS) {
+            ESP_LOGI(TAG, "Display timeout, turning off backlight");
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            s_display_off = true;
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         fb_fill(C_BG);
 
         int active = 0;
@@ -853,28 +893,66 @@ static void refresh_task(void *arg)
 
         lcd_key_event_t key;
         while (xQueueReceive(s_key_queue, &key, 0) == pdTRUE) {
-            switch (key) {
-                case LCD_KEY_NEXT:
-                    if (s_page < LCD_PAGE_COUNT - 1) {
-                        s_page++;
-                        s_scroll_offset = 0;
-                    }
-                    break;
-                case LCD_KEY_PREV:
-                case LCD_KEY_BACK:
-                    if (s_page > LCD_PAGE_HOME) {
-                        s_page--;
-                        s_scroll_offset = 0;
-                    }
-                    break;
-                case LCD_KEY_SELECT:
-                    if (s_page == LCD_PAGE_LIST) {
-                        s_page = LCD_PAGE_DETAIL;
-                    } else if (s_page == LCD_PAGE_DETAIL) {
-                        s_page = LCD_PAGE_LIST;
-                    }
-                    break;
-                default: break;
+            /* 熄屏状态：第一次按键只唤醒屏幕，不执行操作（防误触） */
+            if (s_display_off) {
+                s_display_off = false;
+                s_last_activity_ms = now;
+                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
+                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                ESP_LOGI(TAG, "Display woken by key");
+                continue;
+            }
+            s_last_activity_ms = now;
+
+            /* POWER 键（暂未从按键轮询发送，预留） */
+            if (key == LCD_KEY_POWER) continue;
+
+            int active = 0;
+            if (s_tracker && s_tracker_mutex) {
+                xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
+                for (int i = 0; i < s_max_uavs; i++)
+                    if (s_tracker[i].active) active++;
+                xSemaphoreGive(s_tracker_mutex);
+            }
+
+            if (s_page == LCD_PAGE_LIST) {
+                /* 列表页：User短按=下一个目标，长按=上一个目标；Boot短按=进入详情，长按=返回主页 */
+                if (key == LCD_KEY_NEXT && active > 0) {
+                    s_selection = (s_selection + 1) % active;
+                } else if (key == LCD_KEY_PREV && active > 0) {
+                    s_selection = (s_selection - 1 + active) % active;
+                } else if (key == LCD_KEY_SELECT) {
+                    s_detail_sel = s_selection;
+                    s_page = LCD_PAGE_DETAIL;
+                } else if (key == LCD_KEY_BACK) {
+                    s_page = LCD_PAGE_HOME;
+                    s_scroll_offset = 0;
+                }
+            } else if (s_page == LCD_PAGE_DETAIL) {
+                /* 详情页：User短按=下一个目标，长按=上一个目标；Boot短按=返回列表，长按=主页 */
+                if (key == LCD_KEY_NEXT && active > 0) {
+                    s_detail_sel = (s_detail_sel + 1) % active;
+                } else if (key == LCD_KEY_PREV && active > 0) {
+                    s_detail_sel = (s_detail_sel - 1 + active) % active;
+                } else if (key == LCD_KEY_SELECT) {
+                    s_page = LCD_PAGE_LIST;
+                    s_selection = s_detail_sel;
+                } else if (key == LCD_KEY_BACK) {
+                    s_page = LCD_PAGE_HOME;
+                    s_scroll_offset = 0;
+                }
+            } else {
+                /* 其他页：User短按=切下一页，长按=上一页；Boot短按=进入列表 */
+                if (key == LCD_KEY_NEXT && s_page < LCD_PAGE_COUNT - 1) {
+                    s_page++;
+                    s_scroll_offset = 0;
+                } else if ((key == LCD_KEY_PREV || key == LCD_KEY_BACK) && s_page > LCD_PAGE_HOME) {
+                    s_page--;
+                    s_scroll_offset = 0;
+                } else if (key == LCD_KEY_SELECT && active > 0) {
+                    s_page = LCD_PAGE_LIST;
+                    s_scroll_offset = 0;
+                }
             }
         }
 
@@ -885,47 +963,101 @@ static void refresh_task(void *arg)
 /* ================================================================
  * 按键轮询
  * ================================================================ */
+static void enter_deep_sleep(void)
+{
+    ESP_LOGW(TAG, "=== 进入深度睡眠 ===");
+
+    /* 关闭背光 */
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* 配置 User 键(GPIO0) + Boot 键(GPIO28) 作为唤醒源：任意低电平唤醒 */
+    esp_sleep_enable_ext1_wakeup((1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
+                                  ESP_EXT1_WAKEUP_ANY_LOW);
+
+    esp_deep_sleep_start();
+}
+
+/* ================================================================
+ * 按键轮询
+ *
+ * 按键定义：
+ *   User(GPIO0)：短按=NEXT，长按=PREV（在列表/详情=上下切换目标）
+ *   Boot(GPIO28)：短按=SELECT（确认/进入），长按=BACK（返回主页）
+ *   双键同按1.5秒=POWER（进入深度睡眠，按键唤醒）
+ * ================================================================ */
 static void button_poll_task(void *arg)
 {
     static uint32_t t_user_down = 0, t_boot_down = 0;
     static bool user_down = false, boot_down = false;
     static bool user_long_sent = false, boot_long_sent = false;
+    static uint32_t both_down_time = 0;
     const uint32_t debounce = 30;
     const uint32_t long_press = 600;
 
     while (1) {
         uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        if (gpio_get_level(BTN_USER_PIN) == 0) {
+        int user_lvl = gpio_get_level(BTN_USER_PIN);
+        int boot_lvl = gpio_get_level(BTN_BOOT_PIN);
+
+        /* ---- User 键 ---- */
+        if (user_lvl == 0) {
             if (!user_down) {
                 user_down = true;
                 t_user_down = now;
                 user_long_sent = false;
+                s_last_activity_ms = now;
             } else if (!user_long_sent && (now - t_user_down > long_press)) {
-                lcd_display_send_key(LCD_KEY_PREV);
+                if (!s_both_pressed)
+                    lcd_display_send_key(LCD_KEY_PREV);
                 user_long_sent = true;
             }
         } else if (user_down) {
             if (!user_long_sent && (now - t_user_down > debounce)) {
-                lcd_display_send_key(LCD_KEY_NEXT);
+                if (!s_both_pressed)
+                    lcd_display_send_key(LCD_KEY_NEXT);
             }
             user_down = false;
         }
 
-        if (gpio_get_level(BTN_BOOT_PIN) == 0) {
+        /* ---- Boot 键 ---- */
+        if (boot_lvl == 0) {
             if (!boot_down) {
                 boot_down = true;
                 t_boot_down = now;
                 boot_long_sent = false;
+                s_last_activity_ms = now;
             } else if (!boot_long_sent && (now - t_boot_down > long_press)) {
-                lcd_display_send_key(LCD_KEY_BACK);
+                if (!s_both_pressed)
+                    lcd_display_send_key(LCD_KEY_BACK);
                 boot_long_sent = true;
             }
         } else if (boot_down) {
             if (!boot_long_sent && (now - t_boot_down > debounce)) {
-                lcd_display_send_key(LCD_KEY_SELECT);
+                if (!s_both_pressed)
+                    lcd_display_send_key(LCD_KEY_SELECT);
             }
             boot_down = false;
+        }
+
+        /* ---- 双键同按检测（关机） ---- */
+        if (user_lvl == 0 && boot_lvl == 0) {
+            if (!s_both_pressed) {
+                s_both_pressed = true;
+                both_down_time = now;
+            } else if (now - both_down_time > PWR_BOTH_HOLD_MS) {
+                /* 等待按键释放后再睡眠，避免立即唤醒 */
+                while (gpio_get_level(BTN_USER_PIN) == 0 || gpio_get_level(BTN_BOOT_PIN) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                }
+                vTaskDelay(pdMS_TO_TICKS(100));
+                enter_deep_sleep();
+            }
+        } else {
+            s_both_pressed = false;
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
