@@ -44,7 +44,7 @@ static const char *TAG = "lcd_display";
 static sim_display_info_t s_sim_info = {0};
 
 void lcd_display_set_sim_info(const sim_display_info_t *info) {
-    if (info) memcpy(&s_sim_info, info, sizeof(sim_info));
+    if (info) memcpy(&s_sim_info, info, sizeof(s_sim_info));
 }
 
 /* ================================================================
@@ -1000,4 +1000,3 @@ void lcd_display_command(const char *cmd) { (void)cmd; }
 int lcd_display_get_battery_voltage(uint16_t *v) {
     if (v) *v = 0;
     return -1;
-}
