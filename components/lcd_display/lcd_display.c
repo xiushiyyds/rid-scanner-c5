@@ -479,7 +479,7 @@ static void render_list(void)
         int iy = y + 3;
 
         /* 第一行：编号 + 型号/ID */
-        char buf[40];
+        char buf[64];
         if (s_tracker[i].is_dji && s_tracker[i].dji_model[0]) {
             snprintf(buf, sizeof(buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
         } else {
