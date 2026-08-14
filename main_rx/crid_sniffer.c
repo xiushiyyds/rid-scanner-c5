@@ -353,18 +353,11 @@ esp_err_t crid_sniffer_init(void) {
         return ret;
     }
 
-    ret = esp_wifi_set_ps(WIFI_PS_NONE);
-    if (ret != ESP_OK) {
-        snprintf(err, sizeof(err), "Wi-Fi PS set failed: %s", esp_err_to_name(ret));
-        json_warning("RID_SNIFF", err);
-    }
-
-    /* lcdfix16: 强制 HT20 + 11b/g/n，禁用 11ax/11k/11v 等高开销特性。
-     * ESP32-C5 默认可启 11ax (WiFi 7? No, 11ax)，在 HT40/HE20 下与 BLE
-     * 扫描共存时控制器调度更激进，反而容易丢 Beacon。HT20 对 RID 广播
-     * （全是 11b 1Mbps Beacon）完全够用，且共存更稳。 */
-    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+    /* lcdfix17: RID Beacon 全是 11b 1Mbps DSSS 帧。
+     * 只锁 11b 让控制器走最朴素的 DSSS 接收通路，共存更稳、灵敏度更高。
+     * 关闭省电，确保射频持续接收。 */
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     ret = esp_wifi_set_channel(FIXED_CHANNEL, WIFI_SECOND_CHAN_NONE);
     if (ret != ESP_OK) {
