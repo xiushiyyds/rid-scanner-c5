@@ -49,14 +49,6 @@ void lcd_display_set_sim_info(const sim_display_info_t *info) {
     if (info) memcpy(&s_sim_info, info, sizeof(s_sim_info));
 }
 
-void lcd_display_register_sim_callbacks(sim_action_cb_t start,
-                                         sim_action_cb_t stop,
-                                         sim_mode_cb_t cycle_mode) {
-    s_sim_start_cb = start;
-    s_sim_stop_cb = stop;
-    s_sim_mode_cb = cycle_mode;
-}
-
 /* ================================================================
  * 内部状态
  * ================================================================ */
@@ -88,6 +80,14 @@ static bool s_both_pressed = false;  /* 双键同按检测 */
 static sim_action_cb_t s_sim_start_cb = NULL;
 static sim_action_cb_t s_sim_stop_cb = NULL;
 static sim_mode_cb_t s_sim_mode_cb = NULL;
+
+void lcd_display_register_sim_callbacks(sim_action_cb_t start,
+                                         sim_action_cb_t stop,
+                                         sim_mode_cb_t cycle_mode) {
+    s_sim_start_cb = start;
+    s_sim_stop_cb = stop;
+    s_sim_mode_cb = cycle_mode;
+}
 
 #define DISPLAY_TIMEOUT_MS  60000  /* 60秒无操作自动熄屏 */
 #define PWR_BOTH_HOLD_MS    1500   /* 双键同按1.5秒关机 */
@@ -741,13 +741,13 @@ static void render_detail(void)
             fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 1;
         }
         /* 操作员位置 */
-        if (s_tracker[idx].location.operator_latitude != 0 ||
-            s_tracker[idx].location.operator_longitude != 0) {
+        if (s_tracker[idx].system.operator_latitude != 0 ||
+            s_tracker[idx].system.operator_longitude != 0) {
             y += 2;
             fb_text(4, y, "操作员位置", C_GREEN); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].location.operator_latitude);
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].system.operator_latitude);
             fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
-            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].location.operator_longitude);
+            snprintf(buf, sizeof(buf), "  %.6f", s_tracker[idx].system.operator_longitude);
             fb_text(4, y, buf, C_LTGRAY); y += FONT_LINE_H + 1;
         }
     }
