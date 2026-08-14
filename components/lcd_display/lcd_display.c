@@ -138,9 +138,9 @@ static int init_lcd(void)
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_cfg, &s_panel));
 
     esp_lcd_panel_init(s_panel);
-    /* 与 LILYGO 官方 lcd.ino 一致：竖屏 170×320，无需 swap_xy。
-     * 真机实测需要 x 不镜像、y 镜像，才能正向显示。 */
-    esp_lcd_panel_mirror(s_panel, false, true);
+    /* 竖屏 170×320，无需 swap_xy。
+     * 真机实测：同时 x/y 镜像才能正向显示。 */
+    esp_lcd_panel_mirror(s_panel, true, true);
     esp_lcd_panel_invert_color(s_panel, true);
     esp_lcd_panel_set_gap(s_panel, 35, 0);
     esp_lcd_panel_disp_on_off(s_panel, true);
