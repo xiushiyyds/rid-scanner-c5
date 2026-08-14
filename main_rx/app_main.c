@@ -38,6 +38,7 @@
 #include "lcd_display.h"
 #include "driver/gpio.h"
 #include "sim_core.h"
+#include "sim_wifi.h"
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
@@ -102,7 +103,6 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
         return ESP_OK;
     }
 
-    /* 如果指定了目标数量，更新配置 */
     if (target_count > 0) {
         if (target_count > SIM_MAX_TARGETS) target_count = SIM_MAX_TARGETS;
         s_sim_config.target_count = target_count;
@@ -111,24 +111,28 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     ESP_LOGI("MODE", "Switching to SIMULATE mode (targets=%d)...",
              s_sim_config.target_count);
 
-    /* 停止 sniffer（释放 Wi-Fi radio） */
-    crid_sniffer_deinit();
+    /* lcdfix15: 先停信道保持任务，再停 sniffer，否则信道保持任务
+     * 在 wifi deinit 后还会调 esp_wifi_set_channel() 干扰后续 AP 初始化 */
+    crid_sniffer_stop_channel_hold();
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    /* 初始化模拟器（如果还没初始化） */
+    crid_sniffer_deinit();
+    vTaskDelay(pdMS_TO_TICKS(300));
+
     esp_err_t ret = sim_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim init failed: %s", esp_err_to_name(ret));
-        /* 尝试恢复扫描模式 */
         crid_sniffer_init();
+        crid_sniffer_start_channel_hold();
         return ret;
     }
 
-    /* 启动模拟发射 */
     ret = sim_start(&s_sim_config);
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim start failed: %s", esp_err_to_name(ret));
+        sim_wifi_deinit();
         crid_sniffer_init();
+        crid_sniffer_start_channel_hold();
         return ret;
     }
 
@@ -149,11 +153,9 @@ static esp_err_t switch_to_scan_mode(void) {
 
     ESP_LOGI("MODE", "Switching to SCAN mode...");
 
-    /* 停止模拟器 */
     sim_stop();
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(300));
 
-    /* 重新初始化 sniffer */
     esp_err_t ret = crid_sniffer_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sniffer re-init failed: %s", esp_err_to_name(ret));
@@ -587,25 +589,54 @@ static void monitor_task(void *pvParameter) {
 
 /* ================================================================
  * v1.4: 模拟器 BLE 回调实现（多目标版）
+ *
+ * lcdfix15 关键修复：
+ * 这些回调在 NimBLE host task 上下文中被调用。
+ * WiFi init/start/deinit 可能阻塞数百毫秒，直接在 host task 里
+ * 同步执行会导致 NimBLE 协议栈看门狗超时或 GATT 通知失败，
+ * 表现为网页显示"未连接"。
+ * 改为投递到独立的 mode_switch_task，host task 立即返回。
  * ================================================================ */
 
-/**
- * BLE SIM_START 回调：切换到模拟模式
- * @param target_count 目标数量 (0=使用上次配置)
- */
-static void sim_ble_start_handler(int target_count) {
-    if (s_mode_mutex) xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
-    switch_to_simulate_mode(target_count);
-    if (s_mode_mutex) xSemaphoreGive(s_mode_mutex);
+typedef enum {
+    MODE_OP_START = 1,
+    MODE_OP_STOP  = 2,
+} mode_op_t;
+
+typedef struct {
+    mode_op_t op;
+    int target_count;
+} mode_msg_t;
+
+static QueueHandle_t s_mode_queue = NULL;
+
+static void mode_switch_task(void *arg) {
+    mode_msg_t msg;
+    while (1) {
+        if (xQueueReceive(s_mode_queue, &msg, portMAX_DELAY) == pdTRUE) {
+            if (xSemaphoreTake(s_mode_mutex, portMAX_DELAY) == pdTRUE) {
+                if (msg.op == MODE_OP_START) {
+                    switch_to_simulate_mode(msg.target_count);
+                } else {
+                    switch_to_scan_mode();
+                }
+                xSemaphoreGive(s_mode_mutex);
+            }
+        }
+    }
 }
 
-/**
- * BLE SIM_STOP 回调：切换到扫描模式
- */
+static void post_mode_op(mode_op_t op, int count) {
+    if (!s_mode_queue) return;
+    mode_msg_t msg = { .op = op, .target_count = count };
+    xQueueSend(s_mode_queue, &msg, 0);
+}
+
+static void sim_ble_start_handler(int target_count) {
+    post_mode_op(MODE_OP_START, target_count);
+}
 static void sim_ble_stop_handler(void) {
-    if (s_mode_mutex) xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
-    switch_to_scan_mode();
-    if (s_mode_mutex) xSemaphoreGive(s_mode_mutex);
+    post_mode_op(MODE_OP_STOP, 0);
 }
 
 /**
@@ -719,7 +750,10 @@ static void gps_report_task(void *arg) {
     }
 }
 
-/* LCD 按键回调包装：sim_ble_start_handler 接受 count 参数，LCD 调用时传0 */
+/* LCD 按键回调包装：sim_ble_start_handler 接受 count 参数，LCD 调用时传0。
+ * lcdfix15: 这些回调在 lcd_refresh task 上下文执行，
+ * 不能直接做 WiFi 重配（会阻塞 UI 刷新甚至栈溢出重启），
+ * 统一投递到 mode_switch_task 异步处理。 */
 static void lcd_sim_start_handler(void) {
     sim_ble_start_handler(0);
 }
@@ -742,6 +776,8 @@ void app_main(void) {
     // 初始化模拟器配置（默认值）和模式切换互斥锁
     sim_get_default_config(&s_sim_config);
     s_mode_mutex = xSemaphoreCreateMutex();
+    s_mode_queue = xQueueCreate(4, sizeof(mode_msg_t));
+    xTaskCreatePinnedToCore(mode_switch_task, "mode_sw", 4096, NULL, 5, NULL, 0);
     ESP_LOGI("RID_MAIN", "SIM config: lat=%.4f lon=%.4f ch=%u mode=%s targets=%d tx_power=%d",
              s_sim_config.base_lat, s_sim_config.base_lon,
              s_sim_config.channel, sim_flight_mode_name(s_sim_config.flight_mode),
