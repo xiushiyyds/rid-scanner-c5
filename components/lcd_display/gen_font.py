@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate bitmap font C arrays for LCD display (fixed brace version)."""
+"""Generate bitmap font C arrays for LCD display (lcdfix13)."""
 from PIL import Image, ImageDraw, ImageFont
 import os
 
@@ -11,7 +11,7 @@ CJK_CHARS = """
 列表详情编号信号信道高度速度经度纬度距离航向电量最后发现
 模拟设置状态运行停止模式圆周往返搜索坐标
 发射中已停止帧数地址
-蓝牙配对请在手机输入
+蓝牙配对请在手机输入已连接
 主页设置
 已发现未发现米秒度毫瓦分贝
 警告错误信息强弱
@@ -30,6 +30,13 @@ CJK_CHARS = """
 监测切换选择更新前秒分运行圆周往返
 请按键停止
 标准异常
+型号飞手相对
+滚转俯仰
+升降垂直
+机型
+操作
+员列
+表双
 """
 EXTRA_CHARS = "：，。、（）%/-+→←↑↓★●○◆◇▲▼■□"
 
@@ -87,7 +94,7 @@ def main():
 
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
         f.write("""/*
- * font_data.h — Auto-generated bitmap fonts
+ * font_data.h — Auto-generated bitmap fonts (lcdfix13)
  * 8x16 ASCII + 16x16 CJK
  * DO NOT EDIT MANUALLY
  */
