@@ -7,30 +7,34 @@ CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
-# Observer 角色是 BLE 扫描（ble_gap_disc/ext_disc）所必需的
+# Observer 角色是 BLE 扫描（ble_gap_disc）所必需的
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-# 启用 BLE 5 Extended Advertising / Extended Scanning（BT5 Coded PHY / Long Range）
-CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
-CONFIG_BT_NIMBLE_EXT_ADV=y
 
-# 使用外部 PSRAM 分配 NimBLE 内存
-CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+# lcdfix10：关闭 BLE 5 Extended Advertising，使用 Legacy advertising
+# 提高与手机的兼容性，避免 controller 在 ext_adv + legacy_scan 组合下异常
+# CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT is not set
+# CONFIG_BT_NIMBLE_EXT_ADV is not set
 
-# WiFi/BLE 软件共存（ESP32-C5 单天线时分复用，必须开启，否则 BLE 广播可能被 WiFi 抑制）
+# lcdfix10：NimBLE 内存改回内部 SRAM。
+# 之前放 PSRAM 在 C5 上可能导致 controller 访问延迟/不稳定，
+# LCD 帧缓冲已优先占住 108KB 内部 DMA，其余内部 SRAM 对 NimBLE 足够。
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
+
+# WiFi/BLE 软件共存（ESP32-C5 单天线时分复用，必须开启）
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 
 # 启用 PSRAM
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
-# lcdfix9：为全屏 DMA 帧缓冲（108KB）预留更多内部 SRAM，
-# 确保 heap_caps_malloc(DMA|INTERNAL) 能成功分配
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+# lcdfix10：LCD 必须在 WiFi/BLE 之前初始化以抢占 108KB 连续 DMA SRAM；
+# 此预留值保持 32KB 给其他 DMA 消费者，LCD 自身依赖初始化顺序。
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
 # ESP32-C5 最低芯片版本（LILYGO T-Display-C5 为 Rev v1.2，需 v1.x）
 CONFIG_ESP32C5_REV_MIN_1=y
 
-# 增加主任务栈大小（BLE 需要更多栈空间）
+# 主任务栈
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # 自定义分区表
