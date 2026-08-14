@@ -99,8 +99,11 @@ void lcd_display_register_sim_callbacks(sim_action_cb_t start,
     s_sim_mode_cb = cycle_mode;
 }
 
-#define DISPLAY_TIMEOUT_MS  60000  /* 60秒无操作自动熄屏 */
-#define PWR_BOTH_HOLD_MS    1500   /* 双键同按1.5秒关机 */
+/* lcdfix17: 取消自动熄屏。用户明确要求"只要开关机"，
+ * 60秒自动熄屏在户外使用时经常误判，且唤醒死锁bug已修但
+ * 自动熄屏本身没意义。只保留双键同按手动熄屏。 */
+#define DISPLAY_TIMEOUT_MS  0xFFFFFFFF  /* 禁用自动熄屏（永不超时） */
+#define PWR_BOTH_HOLD_MS    1500   /* 双键同按1.5秒熄屏 */
 
 /* ================================================================
  * 配色方案（深色主题）
@@ -544,29 +547,14 @@ static void draw_battery_icon(int x, int y, int pct, uint16_t color)
 static void render_statusbar(int active_count, int channel)
 {
     fb_fillrect(0, 0, LCD_WIDTH, STATUSBAR_H, C_BLUE);
-    fb_text(4, SB_TEXT_Y, "无人机侦测", C_WHITE);
+    /* lcdfix17: 标题缩短，避免和右侧 GPS/CH/电量 重叠。
+     * 170px 宽度：左标题 ~50px + GPS图标12px + CH信息~45px + 电量~35px = 142px，留余量。 */
+    fb_text(3, SB_TEXT_Y, "侦测", C_WHITE);
 
+    /* 右侧从右到左排：电量%(pw) + 电池图标 + CH信息 + GPS图标 */
     char buf[24];
-    snprintf(buf, sizeof(buf), "CH%d %d机", channel, active_count);
-    int tw = lcd_font_text_width(buf);
 
-    /* lcdfix16: GPS 图标 + 卫星状态（通过回调从 app_main 获取，
-     * 避免 lcd_display 组件直接 include main_rx/gps_module.h）。
-     * 没接GPS/未定位时灰色，定位后绿色+卫星数。 */
-    bool gps_fix = false;
-    int gps_sats = 0;
-    double dummy_lat, dummy_lon, dummy_alt;
-    if (s_gps_provider_cb) {
-        gps_fix = s_gps_provider_cb(&dummy_lat, &dummy_lon, &dummy_alt, &gps_sats);
-    }
-    int gps_right = LCD_WIDTH - 4 - tw;
-    int gps_icon_x = gps_right - (gps_fix ? 22 : 12);  /* 有卫星数时多留位置 */
-    if (gps_icon_x < 80) gps_icon_x = 80;
-    draw_gps_icon(gps_icon_x, (STATUSBAR_H - GPS_ICON_H) / 2, gps_fix, gps_sats);
-
-    fb_text(LCD_WIDTH - 4 - tw - 40, SB_TEXT_Y, buf, C_CYAN);
-
-    /* lcdfix15: 真实电量（AXP2602 I2C） */
+    /* 1. 电量百分比（最右） */
     static int s_batt_pct = -1;
     static uint32_t s_last_batt_read = 0;
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -575,15 +563,37 @@ static void render_statusbar(int active_count, int channel)
         if (mv > 0) {
             s_batt_pct = battery_mv_to_pct(mv);
         } else if (s_batt_pct < 0) {
-            s_batt_pct = 75;  /* I2C 未就绪时用占位 */
+            s_batt_pct = 75;
         }
         s_last_batt_read = now;
     }
-    draw_battery_icon(LCD_WIDTH - 20, (STATUSBAR_H - 8) / 2, s_batt_pct, C_WHITE);
     snprintf(buf, sizeof(buf), "%d%%", s_batt_pct);
     int pw = lcd_font_text_width(buf);
-    fb_text(LCD_WIDTH - 24 - pw, SB_TEXT_Y, buf,
+    int batt_pct_x = LCD_WIDTH - 4 - pw;
+    fb_text(batt_pct_x, SB_TEXT_Y, buf,
             s_batt_pct > 30 ? C_WHITE : C_RED);
+
+    /* 2. 电池图标（在电量%左边） */
+    int batt_icon_x = batt_pct_x - 22;
+    draw_battery_icon(batt_icon_x, (STATUSBAR_H - 8) / 2, s_batt_pct, C_WHITE);
+
+    /* 3. CH + 目标数（在电池图标左边） */
+    snprintf(buf, sizeof(buf), "CH%d %d", channel, active_count);
+    int chw = lcd_font_text_width(buf);
+    int ch_x = batt_icon_x - 4 - chw;
+    fb_text(ch_x, SB_TEXT_Y, buf, C_CYAN);
+
+    /* 4. GPS 图标（在 CH 信息左边） */
+    bool gps_fix = false;
+    int gps_sats = 0;
+    double dummy_lat, dummy_lon, dummy_alt;
+    if (s_gps_provider_cb) {
+        gps_fix = s_gps_provider_cb(&dummy_lat, &dummy_lon, &dummy_alt, &gps_sats);
+    }
+    int gps_w = gps_fix ? 22 : 10;
+    int gps_x = ch_x - 4 - gps_w;
+    if (gps_x < 48) gps_x = 48;  /* 不要压到标题 */
+    draw_gps_icon(gps_x, (STATUSBAR_H - GPS_ICON_H) / 2, gps_fix, gps_sats);
 }
 
 /* ================================================================
@@ -1208,37 +1218,23 @@ static void refresh_task(void *arg)
  * 按键轮询
  * ================================================================ */
 /* ================================================================
- * 熄屏（lcdfix16 替换原来的 light sleep）
+ * 熄屏（lcdfix17：彻底重写，修复死锁）
  *
- * 之前的 light sleep + gpio_wakeup_enable 在 ESP32-C5 + WiFi/BLE
- * 同时运行的场景下不可靠（controller 持锁时按键事件被射频中断吞掉），
- * 表现为"跟关机一样唤不醒"。
+ * lcdfix16 的致命 bug：enter_display_off() 在 button_poll_task 里
+ * 阻塞 while(s_display_off)，但唤醒 s_display_off=false 的代码也在
+ * 同一个 button_poll_task 里 → 自己等自己，永远醒不来。
  *
- * 改为只关背光、CPU/RF/LCD 全部保持运行。button_poll_task 一直在轮询，
- * 任意键 100% 秒唤醒。1.9 寸 IPS 背光占绝大头功耗，熄屏已经能省电。
- *
- * 调用方：双键同按 1.5 秒。进入此函数后会阻塞，直到任意键被按下并释放，
- * 然后恢复背光返回。refresh_task 在 s_display_off=true 时会自动跳过重绘。
+ * 正确做法：enter_display_off 只关背光+置标志，立即返回。
+ * 唤醒完全由 button_poll_task 主循环处理（它一直在跑，不会阻塞）。
+ * refresh_task 看到 s_display_off=true 就跳过重绘。
  * ================================================================ */
 static void enter_display_off(void)
 {
     ESP_LOGW(TAG, "=== 熄屏（背光关，按键唤醒）===");
-
-    /* 关闭背光 */
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-
     s_display_off = true;
-
-    /* 阻塞等待按键唤醒（button_poll_task 里会把 s_display_off 置 false） */
-    while (s_display_off) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-
-    ESP_LOGI(TAG, "Woken from display-off by key");
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    /* 不再阻塞！立即返回，让 button_poll_task 继续轮询按键 */
 }
 
 /* ================================================================
