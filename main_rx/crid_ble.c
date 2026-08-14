@@ -554,16 +554,12 @@ crid_ble_init(void)
     /* 设置同步回调（必须在 nimble_port_init 之前） */
     ble_hs_cfg.sync_cb = ble_on_sync;
 
-    /* 初始化 NimBLE 控制器 + 主机 */
+    /* 初始化 NimBLE 控制器 + 主机。
+     * 注意：nimble_port_init() 内部会调用 esp_bt_controller_init/enable，
+     * 但 controller enable 是异步的——在 nimble_port_freertos_init() 启动
+     * host task 后才真正完成。不能在这里同步检查 ENABLED 状态，否则会
+     * 误判为 controller 初始化失败而提前返回。sync_cb 触发即表示就绪。 */
     nimble_port_init();
-
-    /* 检查 BLE 控制器是否初始化成功 */
-    if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
-        ESP_LOGE(TAG, "BLE controller init failed, BLE disabled (C5 rev1.0 known issue)");
-        vQueueDelete(g_ble_tx_queue);
-        g_ble_tx_queue = NULL;
-        return ESP_ERR_NOT_SUPPORTED;
-    }
 
     /* 注册 GATT 服务 */
     int rc = ble_gatts_count_cfg(gatt_svr_svcs);
