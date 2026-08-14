@@ -412,6 +412,12 @@ ble_advertise_start(void)
 
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    /* lcdfix20：显式设置广播间隔。
+     * 同时开启 Extended scan（50%占空比）+ Legacy connectable adv 时，
+     * 若广播间隔用默认值（约 1.28s），手机可能要数秒才能扫到设备。
+     * 设为 100~150ms，手机基本 1~2 秒内可见。 */
+    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
+    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
     /* lcdfix19：保持 Legacy 可连接广播。
      * 扫描侧需要 Extended adv 来收 BT5 Coded PHY，但外设 NUS 广播数据量小，
      * Legacy 31 字节足够，且对手机/浏览器兼容性最好。 */
