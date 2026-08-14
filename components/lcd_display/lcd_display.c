@@ -971,9 +971,16 @@ static void render_simconfig(void)
     y += FONT_LINE_H + 8;
 
     fb_text(4, y, "状态", C_GREEN);
-    fb_text_right(LCD_WIDTH - 4, y,
-        s_sim_info.is_sim_running ? "运行中" : "已停止",
-        s_sim_info.is_sim_running ? C_GREEN : C_GRAY);
+    const char *state_txt;
+    uint16_t state_col;
+    if (s_sim_info.is_sim_running) {
+        state_txt = "运行中"; state_col = C_GREEN;
+    } else if (s_sim_info.is_sim_armed) {
+        state_txt = "已启用"; state_col = C_ORANGE;
+    } else {
+        state_txt = "已停止"; state_col = C_GRAY;
+    }
+    fb_text_right(LCD_WIDTH - 4, y, state_txt, state_col);
     y += FONT_LINE_H + 6;
 
     fb_text(4, y, "飞行模式", C_GREEN);
@@ -1009,8 +1016,10 @@ static void render_simconfig(void)
     y += FONT_LINE_H + 2;
     if (s_sim_info.is_sim_running)
         fb_text(4, y, "Boot键停止", C_ORANGE);
-    else
+    else if (s_sim_info.is_sim_armed)
         fb_text(4, y, "Boot键发射", C_GREEN);
+    else
+        fb_text(4, y, "请先在手机启用", C_YELLOW);
 }
 
 /* ================================================================
@@ -1260,6 +1269,15 @@ static void refresh_task(void *arg)
  * 唤醒完全由 button_poll_task 主循环处理（它一直在跑，不会阻塞）。
  * refresh_task 看到 s_display_off=true 就跳过重绘。
  * ================================================================ */
+/* 点亮背光（唤醒屏幕时调用）。
+ * lcdfix19 修复：之前 enter_display_off 关背光后，按键只置 s_display_off=false，
+ * 没重新点亮背光，屏幕一直黑，看起来像死机只能 reset。 */
+static void lcd_backlight_on(void)
+{
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+
 static void enter_display_off(void)
 {
     ESP_LOGW(TAG, "=== 熄屏（背光关，按键唤醒）===");
@@ -1306,7 +1324,9 @@ static void button_poll_task(void *arg)
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     vTaskDelay(pdMS_TO_TICKS(50));
+                    lcd_backlight_on();
                     s_display_off = false;
+                    s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 }
             } else if (!user_long_sent && (now - t_user_down > long_press)) {
                 if (!s_both_pressed && !s_display_off)
@@ -1334,7 +1354,9 @@ static void button_poll_task(void *arg)
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     vTaskDelay(pdMS_TO_TICKS(50));
+                    lcd_backlight_on();
                     s_display_off = false;
+                    s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 }
             } else if (!boot_long_sent && (now - t_boot_down > long_press)) {
                 if (!s_both_pressed && !s_display_off)

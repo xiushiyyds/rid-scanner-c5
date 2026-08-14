@@ -196,6 +196,7 @@ void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb);
  */
 typedef struct {
     bool is_sim_running;
+    bool is_sim_armed;         /* lcdfix19: 网页已"启用模拟"，等待Boot键发射 */
     double sim_lat;
     double sim_lon;
     float sim_heading;

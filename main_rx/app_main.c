@@ -85,6 +85,11 @@ typedef enum {
 } device_mode_t;
 
 static volatile device_mode_t s_device_mode = MODE_SCAN;
+/* lcdfix19: 模拟"武装"状态。
+ * 手机网页点"启用模拟"只配置参数并置 armed=true，不直接发射；
+ * 用户在板子上长按Boot进入模拟设置页，确认状态栏显示"已启用"后，
+ * 再短按Boot才真正切到AP发射。停止/断连时清除。 */
+static volatile bool s_sim_armed = false;
 
 /* 模式切换互斥锁 */
 static SemaphoreHandle_t s_mode_mutex = NULL;
@@ -201,6 +206,7 @@ static void update_lcd_sim_info(void) {
 
     if (s_device_mode == MODE_SIMULATE) {
         info.is_sim_running = (sim_get_state() == SIM_STATE_RUNNING);
+        info.is_sim_armed = s_sim_armed;
         sim_get_current_position(&info.sim_lat, &info.sim_lon, &info.sim_heading);
         info.sim_tx_count = sim_get_tx_count();
         info.sim_channel = s_sim_config.channel;
@@ -218,6 +224,7 @@ static void update_lcd_sim_info(void) {
         strncpy(info.sim_ssid, s_sim_config.ssid, sizeof(info.sim_ssid) - 1);
     } else {
         info.is_sim_running = false;
+        info.is_sim_armed = s_sim_armed;
         info.sim_lat = s_sim_config.base_lat;
         info.sim_lon = s_sim_config.base_lon;
         info.sim_channel = s_sim_config.channel;
@@ -649,11 +656,27 @@ static void post_mode_op(mode_op_t op, int count) {
     xQueueSend(s_mode_queue, &msg, 0);
 }
 
+/* BLE"启用模拟"：只武装，不直接发射。真正发射由板子Boot键触发。 */
 static void sim_ble_start_handler(int target_count) {
-    post_mode_op(MODE_OP_START, target_count);
+    if (target_count > 0) {
+        if (target_count > SIM_MAX_TARGETS) target_count = SIM_MAX_TARGETS;
+        if (s_mode_mutex) xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
+        s_sim_config.target_count = target_count;
+        if (s_mode_mutex) xSemaphoreGive(s_mode_mutex);
+    }
+    /* 如果已经在发射，保持发射；否则只标记 armed，等待Boot键 */
+    if (s_device_mode == MODE_SIMULATE && sim_get_state() == SIM_STATE_RUNNING) {
+        ESP_LOGI("MODE", "SIM already running, apply config only");
+        return;
+    }
+    s_sim_armed = true;
+    ESP_LOGI("MODE", "SIM armed by phone; press BOOT on device to start TX");
 }
 static void sim_ble_stop_handler(void) {
-    post_mode_op(MODE_OP_STOP, 0);
+    s_sim_armed = false;
+    if (s_device_mode == MODE_SIMULATE) {
+        post_mode_op(MODE_OP_STOP, 0);
+    }
 }
 
 /**
@@ -713,9 +736,21 @@ static void sim_ble_status_handler(char *buf, size_t buf_size) {
         lon = s_sim_config.base_lon;
     }
 
+    /* lcdfix19: 网页"启用模拟"只是 armed，设备模式仍为 scan；
+     * 真正切到 simulate 是Boot键触发 switch_to_simulate_mode 后。 */
+    const char *mode_str;
+    if (state == SIM_STATE_RUNNING) {
+        mode_str = "simulate";
+    } else if (s_sim_armed) {
+        mode_str = "armed";
+    } else {
+        mode_str = "scan";
+    }
+
     snprintf(buf, buf_size,
              "{\"cmd\":\"sim_status\","
              "\"state\":\"%s\","
+             "\"armed\":%s,"
              "\"targets\":%d,"
              "\"lat\":%.6f,"
              "\"lon\":%.6f,"
@@ -726,13 +761,14 @@ static void sim_ble_status_handler(char *buf, size_t buf_size) {
              "\"tx_count\":%u,"
              "\"device_mode\":\"%s\"}\n",
              state_str,
+             s_sim_armed ? "true" : "false",
              s_sim_config.target_count,
              lat, lon, heading,
              s_sim_config.channel,
              sim_flight_mode_name(s_sim_config.flight_mode),
              s_sim_config.tx_power,
              (unsigned)sim_get_tx_count(),
-             (s_device_mode == MODE_SIMULATE) ? "simulate" : "scan");
+             mode_str);
 }
 
 /* ================================================================
@@ -778,7 +814,14 @@ static void gps_report_task(void *arg) {
  * 不能直接做 WiFi 重配（会阻塞 UI 刷新甚至栈溢出重启），
  * 统一投递到 mode_switch_task 异步处理。 */
 static void lcd_sim_start_handler(void) {
-    sim_ble_start_handler(0);
+    /* lcdfix19: 发射必须先由手机网页"启用模拟"武装，
+     * 再由板子Boot键触发，避免误发射。 */
+    if (!s_sim_armed) {
+        ESP_LOGW("MODE", "BOOT start ignored: SIM not armed by phone");
+        return;
+    }
+    s_sim_armed = false;
+    post_mode_op(MODE_OP_START, 0);
 }
 static void lcd_sim_stop_handler(void) {
     sim_ble_stop_handler();
