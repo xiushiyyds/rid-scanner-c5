@@ -34,6 +34,9 @@ esp_err_t crid_sniffer_init(void);
  */
 void crid_sniffer_start_channel_hold(void);
 
+/** lcdfix15: 停止信道保持任务（切到模拟模式前必须调用） */
+void crid_sniffer_stop_channel_hold(void);
+
 /**
  * v1.3: 停止 sniffer 并释放 Wi-Fi 资源
  * 用于模式切换到模拟模式前调用。
