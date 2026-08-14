@@ -38,7 +38,7 @@ static const char *TAG = "lcd_display";
 static sim_display_info_t s_sim_info = {0};
 
 void lcd_display_set_sim_info(const sim_display_info_t *info) {
-    if (info) memcpy(&s_sim_info, info, sizeof(s_sim_info_t));
+    if (info) memcpy(&s_sim_info, info, sizeof(sim_display_info_t));
 }
 
 /* ================================================================
