@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_err.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,7 @@
 
 /* ESP controller API */
 #include "esp_bt.h"
+#include "esp_coexist.h"
 
 /* NimBLE host stack */
 #include "nimble/nimble_port.h"
@@ -444,7 +446,10 @@ ble_on_sync(void)
 
     ble_advertise_start();
 
-    /* v1.8: NimBLE host 已同步，启动 BLE RID 扫描（与 advertising 并行） */
+    /* v1.8: NimBLE host 已同步，启动 BLE RID 扫描（与 advertising 并行）。
+     * 延迟 500ms 让 advertising 先稳定，再启动 scanning，避免控制器
+     * 在同时设置 adv + scan 时产生竞态导致广播不可见。 */
+    vTaskDelay(pdMS_TO_TICKS(500));
     crid_ble_scan_start();
 }
 
@@ -559,10 +564,20 @@ crid_ble_init(void)
      * 但 controller enable 是异步的——在 nimble_port_freertos_init() 启动
      * host task 后才真正完成。不能在这里同步检查 ENABLED 状态，否则会
      * 误判为 controller 初始化失败而提前返回。sync_cb 触发即表示就绪。 */
-    nimble_port_init();
+    esp_err_t err = nimble_port_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* 确保使用公共地址（BLE_OWN_ADDR_PUBLIC 需要身份地址已配置） */
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_hs_util_ensure_addr returned %d (non-fatal)", rc);
+    }
 
     /* 注册 GATT 服务 */
-    int rc = ble_gatts_count_cfg(gatt_svr_svcs);
+    rc = ble_gatts_count_cfg(gatt_svr_svcs);
     if (rc != 0) {
         ESP_LOGE(TAG, "GATT count failed (rc=%d)", rc);
         nimble_port_deinit();
