@@ -87,6 +87,7 @@ typedef enum {
     LCD_KEY_NEXT,            // 下一项 / 下一页面
     LCD_KEY_SELECT,          // 确认 / 进入详情
     LCD_KEY_BACK,            // 返回
+    LCD_KEY_POWER,           // 电源/睡眠
 } lcd_key_event_t;
 
 /* ================================================================
