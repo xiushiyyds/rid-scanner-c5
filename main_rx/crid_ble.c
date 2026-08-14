@@ -19,7 +19,6 @@
 
 /* ESP controller API */
 #include "esp_bt.h"
-#include "esp_coexist.h"
 
 /* NimBLE host stack */
 #include "nimble/nimble_port.h"
