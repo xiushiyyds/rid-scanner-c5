@@ -35,6 +35,7 @@
 #include "driver/rtc_io.h"
 #include "driver/gpio.h"
 #include "esp_intr_alloc.h"
+#include "driver/i2c.h"
 
 #ifndef FIXED_CHANNEL
 #define FIXED_CHANNEL 6
@@ -122,6 +123,62 @@ void lcd_display_register_sim_callbacks(sim_action_cb_t start,
 
 #define SB_TEXT_Y     ((STATUSBAR_H - FONT_LINE_H) / 2)
 #define FT_TEXT_Y     (CONTENT_Y1 + (FOOTER_H - FONT_LINE_H) / 2)
+
+/* ================================================================
+ * AXP2602 PMIC 电池电压读取（I2C）
+ * T-Display-C5: SDA=GPIO2, SCL=GPIO3, addr=0x62
+ * ================================================================ */
+#define AXP_I2C_PORT       I2C_NUM_0
+#define AXP_I2C_FREQ       100000
+static bool s_axp_inited = false;
+
+static esp_err_t axp_read_reg(uint8_t reg, uint8_t *val) {
+    return i2c_master_write_read_device(AXP_I2C_PORT, AXP2602_I2C_ADDR,
+                                        &reg, 1, val, 1, pdMS_TO_TICKS(50));
+}
+
+static void axp2602_init(void) {
+    if (s_axp_inited) return;
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = TOUCH_PIN_SDA,
+        .scl_io_num = TOUCH_PIN_SCL,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = AXP_I2C_FREQ,
+    };
+    if (i2c_param_config(AXP_I2C_PORT, &conf) != ESP_OK) return;
+    if (i2c_driver_install(AXP_I2C_PORT, conf.mode, 0, 0, 0) != ESP_OK) return;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    /* 读取芯片 ID 寄存器 0x03 校验（AXP2602 通常返回 0x34 或类似） */
+    uint8_t id = 0;
+    if (axp_read_reg(0x03, &id) == ESP_OK) {
+        ESP_LOGI(TAG, "AXP2602 detected, chip ID=0x%02X", id);
+        s_axp_inited = true;
+    } else {
+        ESP_LOGW(TAG, "AXP2602 not responding on I2C");
+    }
+}
+
+/* 返回电池电压 (mV)，失败返回 -1 */
+static int axp2602_read_battery_mv(void) {
+    if (!s_axp_inited) return -1;
+    /* AXP2602 电池电压高字节：0x34, 低字节：0x35 (bit7-4 有效)
+     * 公式: voltage = (H << 4 | L >> 4) * 1.1mV  (参考 LILYGO AXP2602 demo) */
+    uint8_t hi = 0, lo = 0;
+    if (axp_read_reg(0x34, &hi) != ESP_OK) return -1;
+    if (axp_read_reg(0x35, &lo) != ESP_OK) return -1;
+    int raw = ((int)hi << 4) | ((lo >> 4) & 0x0F);
+    int mv = (int)(raw * 1.1f);
+    return mv;
+}
+
+static int battery_mv_to_pct(int mv) {
+    if (mv <= 3300) return 0;
+    if (mv >= 4200) return 100;
+    /* 简单线性映射；锂电实际曲线 3.3V~4.2V */
+    return (mv - 3300) * 100 / 900;
+}
 
 /* ================================================================
  * DMA 完成回调（ISR 安全）
@@ -443,8 +500,26 @@ static void render_statusbar(int active_count, int channel)
     char buf[24];
     snprintf(buf, sizeof(buf), "CH%d %d机", channel, active_count);
     int tw = lcd_font_text_width(buf);
-    fb_text(LCD_WIDTH - 4 - tw - 24, SB_TEXT_Y, buf, C_CYAN);
-    draw_battery_icon(LCD_WIDTH - 20, (STATUSBAR_H - 8) / 2, 75, C_WHITE);
+    fb_text(LCD_WIDTH - 4 - tw - 40, SB_TEXT_Y, buf, C_CYAN);
+
+    /* lcdfix15: 真实电量（AXP2602 I2C） */
+    static int s_batt_pct = -1;
+    static uint32_t s_last_batt_read = 0;
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (s_batt_pct < 0 || now - s_last_batt_read > 5000) {
+        int mv = axp2602_read_battery_mv();
+        if (mv > 0) {
+            s_batt_pct = battery_mv_to_pct(mv);
+        } else if (s_batt_pct < 0) {
+            s_batt_pct = 75;  /* I2C 未就绪时用占位 */
+        }
+        s_last_batt_read = now;
+    }
+    draw_battery_icon(LCD_WIDTH - 20, (STATUSBAR_H - 8) / 2, s_batt_pct, C_WHITE);
+    snprintf(buf, sizeof(buf), "%d%%", s_batt_pct);
+    int pw = lcd_font_text_width(buf);
+    fb_text(LCD_WIDTH - 24 - pw, SB_TEXT_Y, buf,
+            s_batt_pct > 30 ? C_WHITE : C_RED);
 }
 
 /* ================================================================
@@ -1070,35 +1145,45 @@ static void refresh_task(void *arg)
  * ================================================================ */
 static void enter_deep_sleep(void)
 {
-    ESP_LOGW(TAG, "=== 进入轻睡眠（按键唤醒）===");
+    ESP_LOGW(TAG, "=== 进入轻睡眠（GPIO 按键唤醒）===");
 
     /* 关闭背光 */
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 
-    /* lcdfix14：原来用 deep sleep，但 GPIO0(Boot strapping pin) 作为唤醒源时
-     * 会因 strapping 状态导致芯片进入下载模式而非正常启动，且 deep sleep 等于
-     * 冷启动，所有状态丢失、重启画面像关机。改为 light sleep：
-     *  - CPU 暂停、WiFi/BLE 保持（可继续侦测）
-     *  - 任意按键低电平唤醒，立即回到原画面
-     *  - 不复位、不重启，体感跟手机锁屏一致 */
+    /* lcdfix15 修复：lcdfix14 用了 esp_sleep_enable_ext1_wakeup()，
+     * 那是 deep sleep 的 RTC GPIO 唤醒源，在 light sleep 下
+     * ESP32-C5 不会按预期唤醒，所以"按任意键不恢复"。
+     * 正确方式：gpio_wakeup_enable() + esp_sleep_enable_gpio_wakeup()，
+     * 这是 light sleep 的数字 GPIO 唤醒，任意低电平立即唤醒。 */
+
+    /* 先确保两个按键 GPIO 已配为输入+上拉 */
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_LOW_LEVEL,
+        .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
 
-    /* 同时配置 ext1 唤醒源（light sleep 下 GPIO0 已通过 rtc_gpio 初始化过，
-     * 用 ANY_LOW 触发；避免用 deep_sleep）*/
-    esp_sleep_enable_ext1_wakeup((1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
-                                  ESP_EXT1_WAKEUP_ANY_LOW);
+    /* 配置 GPIO 唤醒源：任意一个按键拉低就唤醒 */
+    gpio_wakeup_enable(BTN_USER_PIN, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable(BTN_BOOT_PIN, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    /* 进入 light sleep。CPU 暂停，WiFi/BLE/RAM 保持，
+     * 唤醒后从这里继续执行，不复位、不丢状态。 */
     esp_light_sleep_start();
 
-    /* 唤醒后恢复背光和 GPIO 轮询配置 */
-    ESP_LOGI(TAG, "Woken from light sleep");
+    /* 唤醒原因可查，但这里直接恢复背光 */
+    ESP_LOGI(TAG, "Woken from light sleep by GPIO");
+
+    /* 清 GPIO 唤醒配置，避免影响正常轮询 */
+    gpio_wakeup_disable(BTN_USER_PIN);
+    gpio_wakeup_disable(BTN_BOOT_PIN);
+
+    /* 恢复背光 */
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
     s_last_activity_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -1226,6 +1311,9 @@ int lcd_display_init(void)
     };
     gpio_config(&btn_cfg);
 
+    /* lcdfix15: 初始化 AXP2602 PMIC（真实电量） */
+    axp2602_init();
+
     s_key_queue = xQueueCreate(8, sizeof(lcd_key_event_t));
     if (!s_key_queue) return -1;
 
@@ -1254,6 +1342,8 @@ int lcd_display_get_selection(void) { return s_selection; }
 void lcd_display_command(const char *cmd) { (void)cmd; }
 
 int lcd_display_get_battery_voltage(uint16_t *v) {
-    if (v) *v = 0;
-    return -1;
+    int mv = axp2602_read_battery_mv();
+    if (mv <= 0) return -1;
+    if (v) *v = (uint16_t)mv;
+    return 0;
 }
