@@ -116,6 +116,12 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     crid_sniffer_stop_channel_hold();
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    /* lcdfix17: 切到模拟模式前必须停掉 BLE 扫描。
+     * BLE observer 持续占用射频，AP 模式 esp_wifi_start 会和它抢
+     * 空口，导致 AP Beacon 发不出去或 80211_tx 失败。 */
+    crid_ble_scan_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     crid_sniffer_deinit();
     /* lcdfix16: 给 WiFi 控制器足够时间完全释放。
      * esp_wifi_deinit() 是异步的，底层 controller 有时需要数百毫秒
@@ -126,6 +132,7 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     esp_err_t ret = sim_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim init failed: %s", esp_err_to_name(ret));
+        crid_ble_scan_start();  /* 恢复 BLE 扫描 */
         crid_sniffer_init();
         crid_sniffer_start_channel_hold();
         return ret;
@@ -135,6 +142,7 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim start failed: %s", esp_err_to_name(ret));
         sim_wifi_deinit();
+        crid_ble_scan_start();  /* 恢复 BLE 扫描 */
         crid_sniffer_init();
         crid_sniffer_start_channel_hold();
         return ret;
@@ -169,6 +177,9 @@ static esp_err_t switch_to_scan_mode(void) {
     }
 
     crid_sniffer_start_channel_hold();
+
+    /* lcdfix17: 恢复 BLE RID 扫描（模拟模式期间停掉了） */
+    crid_ble_scan_start();
 
     s_device_mode = MODE_SCAN;
     ESP_LOGI("MODE", "Now in SCAN mode");
@@ -739,19 +750,25 @@ static void lcd_sim_update_task(void *arg) {
 }
 
 /* ================================================================
- * GPS 自身位置上报任务 - 每3秒通过BLE发送 SELF_GPS:lat,lon,alt,sats
+ * GPS 自身位置上报任务
+ * lcdfix17: 无论有没有 GPS 硬件，每3秒都通过BLE发送 SELF_GPS 状态。
+ * 有定位：SELF_GPS:lat,lon,alt,sats
+ * 无定位/无硬件：SELF_GPS:0,0,0,0  （网页据此显示"等待定位"）
+ * 之前只在 valid 时发送，没接 GPS 模块时网页完全收不到状态，
+ * 用户无法区分是"没连上"还是"没定位"。
  * ================================================================ */
 static void gps_report_task(void *arg) {
     char buf[96];
     while (1) {
         gps_data_t gd = gps_get_data();
         if (gd.valid && gd.fix_quality > 0) {
-            int len = snprintf(buf, sizeof(buf), "SELF_GPS:%.6f,%.6f,%.1f,%d\n",
-                               gd.latitude, gd.longitude, gd.altitude, gd.satellites);
-            if (len > 0) {
-                crid_ble_write_cb(buf, (size_t)len, NULL);
-            }
+            snprintf(buf, sizeof(buf), "SELF_GPS:%.6f,%.6f,%.1f,%d\n",
+                     gd.latitude, gd.longitude, gd.altitude, gd.satellites);
+        } else {
+            /* 无定位或无硬件：发零值，让网页知道板子在线但GPS未定位 */
+            snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,0\n");
         }
+        crid_ble_write_cb(buf, strlen(buf), NULL);
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
