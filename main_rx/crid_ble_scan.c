@@ -214,16 +214,15 @@ static int start_scan(void) {
      * 产生资源争用，导致本机广播不可见。先确保 Legacy 稳定，后续有
      * Long Range 需求再切换。
      */
-    /* lcdfix16 关键修复：
-     * 之前 itvl=0/window=0 会让控制器用"连续扫描"（100%占空比），
-     * 在 ESP32-C5 单天线上 WiFi Beacon 完全收不到，表现为 RID 信号全无。
-     * 改为 100ms 间隔 / 30ms 窗口（30%占空比），给 WiFi 留 70% 空口。
-     * 这是 BLE+WiFi coexist 下稳定共存的经典配置。 */
+    /* lcdfix17: BLE 扫描占空比调到 50%。
+     * lcdfix16 的 30% (itvl=160/window=48) 在某些环境下窗口太短，
+     * 37/38/39 三个广告信道轮询一周容易错过。改为 itvl=96(60ms)/window=48(30ms)，
+     * 50% 占空比，既给 WiFi 留足空口收 Beacon，又保证 BLE 广告接收稳定。 */
     struct ble_gap_disc_params disc_params = {0};
     int rc;
 
     memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
+    disc_params.itvl = 96;            /* 96 × 0.625ms = 60ms */
     disc_params.window = 48;          /* 48 × 0.625ms = 30ms */
     disc_params.filter_policy = 0;    /* 接收所有 */
     disc_params.limited = 0;
