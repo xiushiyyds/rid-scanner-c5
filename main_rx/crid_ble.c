@@ -303,6 +303,13 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 g_pair_display_cb("RID-Scanner");  /* 显示"蓝牙已连接"3秒 */
             }
 
+            /* 主动通知网页端：连接即配对成功（兼容旧网页的 PAIR_OK 流程）*/
+            const char *pair_ok = "PAIR_OK\n";
+            crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
+            /* 顺便推送一次状态 */
+            const char *status = "STATUS:targets:0,gps:searching\n";
+            crid_ble_write_cb(status, strlen(status), NULL);
+
             /* 请求更低的连接间隔以提高吞吐量 (7.5ms~15ms) */
             struct ble_gap_upd_params params = {
                 .itvl_min = 6,  /* 7.5ms = 6x1.25ms */
