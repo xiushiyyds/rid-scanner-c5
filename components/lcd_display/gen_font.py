@@ -29,10 +29,22 @@ OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_dat
 EXTRA_SYMBOLS = "：，。、（）%/-+→←↑↓★●○◆◇▲▼■□°"
 
 def extract_ui_chars():
-    """从 lcd_display.c 中提取所有字符串字面量里的 CJK 字符"""
-    src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcd_display.c")
+    """从 lcd_display.c / lcd_display.h 以及 app_main.c 中
+    提取所有字符串字面量里的 CJK 字符，杜绝缺字。
+    lcdfix17: 之前只扫 lcd_display.c，但 app_main.c 里通过 sim_info
+    传给 LCD 的中文字符串（"已停止"等）没被扫到，导致真机缺字。"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    # 扫描所有 UI 相关源文件
+    scan_files = [
+        os.path.join(base, "lcd_display.c"),
+        os.path.join(base, "include", "lcd_display.h"),
+        os.path.join(base, "..", "..", "main_rx", "app_main.c"),
+        os.path.join(base, "..", "crid_simulator", "sim_core.c"),
+    ]
     chars = set()
-    if os.path.exists(src_path):
+    for src_path in scan_files:
+        if not os.path.exists(src_path):
+            continue
         with open(src_path, encoding='utf-8') as f:
             src = f.read()
         for m in re.finditer(r'"([^"]*)"', src):
