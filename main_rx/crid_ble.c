@@ -100,8 +100,10 @@ static const ble_uuid128_t gatt_svr_chr_nus_rx_uuid =
  * ================================================================ */
 static uint16_t g_nus_rx_handle;
 static uint16_t g_nus_tx_handle;
+static uint16_t g_nus_tx_cccd_handle;  /* CCCD descriptor handle (tx_handle + 1) */
 static uint16_t g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool g_ble_initialized = false;
+static bool g_subscribed = false;     /* 手机是否已使能通知 */
 static esp_timer_handle_t g_adv_timer = NULL;
 #define ADV_TIMEOUT_US (60 * 1000 * 1000)
 
@@ -128,6 +130,7 @@ static portMUX_TYPE g_ble_line_mux = portMUX_INITIALIZER_UNLOCKED;
  * ================================================================ */
 static int gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
                                     struct ble_gatt_access_ctxt *ctxt, void *arg);
+static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
 static void ble_host_task(void *param);
 static void ble_tx_task(void *param);
@@ -167,7 +170,6 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
 {
     (void)arg;
     (void)conn_handle;
-    (void)attr_handle;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         if (attr_handle == g_nus_rx_handle) {
@@ -183,6 +185,63 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
         }
     }
     return 0;
+}
+
+/* 服务注册完成回调：此时 GATT 表已构建完毕，可以安全获取 handle。
+ *
+ * NimBLE 注册顺序：对于每个 characteristic：
+ *   1. BLE_GATT_REGISTER_OP_CHR — 注册 characteristic declaration + value
+ *   2. BLE_GATT_REGISTER_OP_DSC — 注册 CCCD descriptor（如果有 NOTIFY/INDICATE）
+ * 所以在 CHR 回调时 CCCD handle 还不知道，需要在 DSC 回调中记录。 */
+static uint16_t s_pending_tx_val_handle = 0;  /* TX chr 注册后暂存 val_handle */
+
+static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg) {
+    (void)arg;
+    char buf[BLE_UUID_STR_LEN];
+
+    switch (ctxt->op) {
+    case BLE_GATT_REGISTER_OP_SVC:
+        ESP_LOGI(TAG, "Registered svc %s handle=%d",
+                 ble_uuid_to_str(ctxt->svc.svc->uuid, buf),
+                 ctxt->svc.handle);
+        break;
+
+    case BLE_GATT_REGISTER_OP_CHR:
+        ESP_LOGI(TAG, "Registered chr %s def_handle=%d val_handle=%d",
+                 ble_uuid_to_str(ctxt->chr.chr->uuid, buf),
+                 ctxt->chr.def_handle, ctxt->chr.val_handle);
+        /* NUS TX (notify) */
+        if (ble_uuid_cmp(ctxt->chr.chr->uuid, &gatt_svr_chr_nus_tx_uuid.u) == 0) {
+            g_nus_tx_handle = ctxt->chr.val_handle;
+            s_pending_tx_val_handle = ctxt->chr.val_handle;
+            ESP_LOGI(TAG, "NUS TX val_handle=%d (waiting for CCCD)",
+                     g_nus_tx_handle);
+        }
+        /* NUS RX (write) */
+        if (ble_uuid_cmp(ctxt->chr.chr->uuid, &gatt_svr_chr_nus_rx_uuid.u) == 0) {
+            g_nus_rx_handle = ctxt->chr.val_handle;
+            ESP_LOGI(TAG, "NUS RX val_handle=%d", g_nus_rx_handle);
+        }
+        break;
+
+    case BLE_GATT_REGISTER_OP_DSC:
+        ESP_LOGI(TAG, "Registered dsc %s handle=%d",
+                 ble_uuid_to_str(ctxt->dsc.dsc->uuid, buf),
+                 ctxt->dsc.handle);
+        /* CCCD UUID = 0x2902 (16-bit)，紧跟在 TX characteristic value 后面注册 */
+        if (s_pending_tx_val_handle != 0 &&
+            ctxt->dsc.dsc->uuid->type == BLE_UUID_TYPE_16 &&
+            ((const ble_uuid16_t *)ctxt->dsc.dsc->uuid)->value == 0x2902) {
+            g_nus_tx_cccd_handle = ctxt->dsc.handle;
+            ESP_LOGI(TAG, "NUS TX CCCD handle=%d (for val_handle=%d)",
+                     g_nus_tx_cccd_handle, s_pending_tx_val_handle);
+            s_pending_tx_val_handle = 0;
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* 广播超时回调 */
@@ -218,10 +277,10 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             g_nus_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected, conn_handle=%d", g_nus_conn_handle);
 
-            /* 连接瞬间立即停止 BLE RID 扫描，把射频让给 GATT service discovery。
-             * 扫描在 SUBSCRIBE 事件（手机使能通知）后再以低占空比恢复。 */
-            crid_ble_scan_stop();
-
+            /* v2.0.8: 不在 NimBLE host task 上下文做阻塞操作。
+             * TDD 停止和扫描恢复交给独立 task 处理，避免死锁。
+             * TDD 任务会在下次循环检测到 s_tdd_should_stop 自动退出，
+             * 即使扫描继续跑一会儿也不影响 GATT（controller 会调度）。 */
             if (g_pair_display_cb) {
                 g_pair_display_cb("RID-Scanner");
             }
@@ -245,6 +304,7 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGW(TAG, "Disconnected (reason=0x%04x)", event->disconnect.reason);
         g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        g_subscribed = false;
         crid_ble_reset_pair();
         /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
          * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
@@ -261,11 +321,27 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         /* 手机写入 CCCD 使能 TX characteristic notification。
-         * 这是发送 PAIR_OK 的精确时机——此时手机端已 startNotifications()，
-         * 不再依赖固定延迟猜测，彻底解决"卡在待连接"问题。 */
-        if (event->subscribe.attr_handle == g_nus_tx_handle &&
-            event->subscribe.cur_notify == 1) {
+         * v2.0.8: attr_handle 是 CCCD descriptor handle。
+         * 同时匹配 cccd_handle 和 tx_handle（容错不同 NimBLE 版本行为）。 */
+        ESP_LOGI(TAG, "SUBSCRIBE: attr=%d tx_val=%d tx_cccd=%d notify=%d indicate=%d",
+                 event->subscribe.attr_handle,
+                 g_nus_tx_handle, g_nus_tx_cccd_handle,
+                 event->subscribe.cur_notify, event->subscribe.cur_indicate);
+
+        /* 兜底：如果 cccd_handle 没被 register_cb 捕获到，
+         * 但 attr_handle 与 tx_handle 相差 1，也认为是 TX 的 CCCD */
+        bool is_tx_cccd = (event->subscribe.attr_handle == g_nus_tx_cccd_handle) ||
+                          (g_nus_tx_cccd_handle == 0 && g_nus_tx_handle != 0 &&
+                           event->subscribe.attr_handle == g_nus_tx_handle + 1);
+
+        if (is_tx_cccd && event->subscribe.cur_notify == 1) {
             ESP_LOGI(TAG, "Client subscribed to TX notifications");
+            /* 如果 cccd_handle 之前没拿到，现在学到了 */
+            if (g_nus_tx_cccd_handle == 0) {
+                g_nus_tx_cccd_handle = event->subscribe.attr_handle;
+                ESP_LOGI(TAG, "Learned TX CCCD handle=%d", g_nus_tx_cccd_handle);
+            }
+            g_subscribed = true;
             g_paired = true;
             const char *pair_ok = "PAIR_OK\n";
             crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
@@ -415,6 +491,9 @@ ble_advertise_start(void)
  * ================================================================ */
 static void ble_connected_scan_task(void *arg) {
     (void)arg;
+    /* 先停 TDD 和扫描（在独立 task 上下文，不阻塞 NimBLE host） */
+    crid_ble_scan_stop();
+    /* 等 2 秒让手机完成 service discovery + 初始数据交换 */
     vTaskDelay(pdMS_TO_TICKS(2000));
     if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGI(TAG, "Resuming BLE RID scan (low duty, GATT coexist)");
@@ -470,19 +549,12 @@ ble_on_sync(void)
                  addr_val[2], addr_val[1], addr_val[0]);
     }
 
-    rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
-                                 &gatt_svr_chr_nus_tx_uuid.u,
-                                 NULL, &g_nus_tx_handle);
-    if (rc != 0) {
-        g_nus_tx_handle = 0;
-    }
-
-    rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
-                             &gatt_svr_chr_nus_rx_uuid.u,
-                             NULL, &g_nus_rx_handle);
-    if (rc != 0) {
-        g_nus_rx_handle = 0;
-    }
+    /* v2.0.8: handle 在 gatt_svr_register_cb 中获取，
+     * 不再依赖 ble_gatts_find_chr（在 sync 回调中 GATT 表可能尚未就绪）。
+     * 初始化时清零，register_cb 触发后自动填充。 */
+    g_nus_tx_handle = 0;
+    g_nus_rx_handle = 0;
+    g_nus_tx_cccd_handle = 0;
 
     ble_advertise_start();
 
@@ -512,6 +584,10 @@ ble_tx_task(void *param)
 {
     (void)param;
     char *buf;
+    uint32_t dropped_no_conn = 0;
+    uint32_t dropped_no_handle = 0;
+    uint32_t sent_ok = 0;
+    uint32_t notify_errors = 0;
 
     while (1) {
         if (xQueueReceive(g_ble_tx_queue, &buf, portMAX_DELAY) != pdTRUE) {
@@ -520,29 +596,56 @@ ble_tx_task(void *param)
         if (!buf) continue;
 
         size_t data_len = strnlen(buf, BLE_TX_BUF_SIZE);
-        if (data_len > 0 && g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE && g_nus_tx_handle != 0) {
-            uint16_t mtu = ble_att_mtu(g_nus_conn_handle);
-            uint16_t chunk_size = (mtu >= 6) ? (mtu - 3) : 20;
-            size_t offset = 0;
+        if (data_len == 0) { free(buf); continue; }
 
-            while (offset < data_len) {
-                size_t send_len = data_len - offset;
-                if (send_len > chunk_size) send_len = chunk_size;
+        if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+            dropped_no_conn++;
+            free(buf);
+            continue;
+        }
+        if (g_nus_tx_handle == 0) {
+            dropped_no_handle++;
+            if ((dropped_no_handle % 50) == 1) {
+                ESP_LOGW(TAG, "TX: g_nus_tx_handle=0, dropping data (count=%lu)",
+                         (unsigned long)dropped_no_handle);
+            }
+            free(buf);
+            continue;
+        }
 
-                struct os_mbuf *om = ble_hs_mbuf_from_flat(buf + offset, send_len);
-                if (om) {
-                    int rc = ble_gattc_notify_custom(g_nus_conn_handle,
-                                                      g_nus_tx_handle, om);
-                    if (rc != 0) {
-                        os_mbuf_free_chain(om);
-                        break;
+        uint16_t mtu = ble_att_mtu(g_nus_conn_handle);
+        uint16_t chunk_size = (mtu >= 6) ? (mtu - 3) : 20;
+        size_t offset = 0;
+        bool send_ok = true;
+
+        while (offset < data_len) {
+            size_t send_len = data_len - offset;
+            if (send_len > chunk_size) send_len = chunk_size;
+
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(buf + offset, send_len);
+            if (om) {
+                int rc = ble_gattc_notify_custom(g_nus_conn_handle,
+                                                  g_nus_tx_handle, om);
+                if (rc != 0) {
+                    notify_errors++;
+                    if ((notify_errors % 20) == 1) {
+                        ESP_LOGW(TAG, "notify_custom rc=%d (total=%lu)",
+                                 rc, (unsigned long)notify_errors);
                     }
-                }
-                offset += send_len;
-                if (offset < data_len) {
-                    vTaskDelay(pdMS_TO_TICKS(5));
+                    send_ok = false;
+                    break;
                 }
             }
+            offset += send_len;
+            if (offset < data_len) {
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
+        }
+        if (send_ok) sent_ok++;
+        if ((sent_ok % 100) == 0) {
+            ESP_LOGI(TAG, "TX stats: sent=%lu no_conn=%lu no_hdl=%lu errs=%lu",
+                     (unsigned long)sent_ok, (unsigned long)dropped_no_conn,
+                     (unsigned long)dropped_no_handle, (unsigned long)notify_errors);
         }
 
         free(buf);
@@ -590,6 +693,8 @@ crid_ble_init(void)
     }
 
     ble_hs_cfg.sync_cb = ble_on_sync;
+    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
+    ble_hs_cfg.gatts_register_arg = NULL;
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {

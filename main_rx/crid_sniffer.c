@@ -203,15 +203,17 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ================================================================
- 信道轮转（三信道轮巡 v2.0.4）
+ 信道轮转（三信道轮巡 v2.0.8 优化）
 
- ch6 驻留 2 秒（多数无人机默认信道，偏重），
- ch1/ch11 各驻留 500ms（覆盖非默认信道）。
- 周期 3 秒，ch6 占 67%，ch1/ch11 各占 17%。
- WiFi sniffer 持续运行，BLE 扫描也持续运行。
+ 与 TDD 短周期配合：TDD 每 ~400ms 给 WiFi 100ms 窗口。
+ 信道轮转周期也缩短，确保每个 WiFi 窗口落在正确信道上。
+
+ ch6 驻留 800ms（多数无人机默认信道，偏重），
+ ch1/ch11 各驻留 300ms（覆盖非默认信道）。
+ 周期 1.4 秒，ch6 占 57%，ch1/ch11 各占 21%。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {2000, 500, 500};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {800, 300, 300};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 

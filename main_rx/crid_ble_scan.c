@@ -5,8 +5,8 @@
  * 匹配 ASTM F3411 / ASD-STAN 分配的 Service UUID 0xFFFA，
  * 提取 OpenDroneID message pack 并投递到 sniffer 队列。
  *
- * 纯侦测板：BLE 连续扫描，无 TDD 分时。
- * 扫描占空比 40%（已连接时 window=40ms / itvl=100ms），给 WiFi sniffer 和 GATT 留空口。
+ * TDD 时分复用：BLE 扫描与 WiFi sniffer 共享单射频。
+ * v2.0.8: 缩短 TDD 周期至 ~400ms，减少 RID 广播漏检。
  */
 
 #include <string.h>
@@ -248,30 +248,31 @@ static int start_scan(void) {
 }
 
 /* ================================================================
- * TDD 时分复用（v2.0.7 关键修复）
+ * TDD 时分复用（v2.0.7 引入，v2.0.8 优化周期）
  *
- * ESP32-C5 只有一个 2.4GHz 射频，BLE 连续扫描时 WiFi sniffer 被饿死，
- * 串口日志显示 total_pkts=0。之前版本靠 TDD 让 BLE 定期暂停，
- * WiFi 获得接收窗口，三信道轮巡正常工作，灵敏度比肩 RID 肩灯。
+ * ESP32-C5 只有一个 2.4GHz 射频，BLE 连续扫描时 WiFi sniffer 被饿死。
+ * TDD 让 BLE 定期短暂暂停，WiFi 获得接收窗口。
  *
- * 方案：BLE 扫描运行 800ms 后暂停 200ms，把这 200ms 完全让给 WiFi。
- * GATT 连接不受影响（连接事件由 controller 在 scan 间隙调度，
- * 暂停扫描反而给 GATT 更多空口）。暂停期间 WiFi 切换信道并接收 Beacon。
+ * v2.0.8 优化：周期从 1000ms 缩短到 ~330ms。
+ * RID 广播间隔通常 100ms~1s，短周期能显著降低漏检概率：
+ *   - BLE 300ms 活跃足以覆盖 3 个广播间隔
+ *   - WiFi 100ms 窗口在每个信道轮转周期内能多次命中
+ *   - 频繁切换不影响 GATT（连接事件由 controller 独立调度）
  *
- * 未连接(HIGH)：BLE 800ms / WiFi 200ms，BLE 占 80%
- * 已连接(LOW) ：BLE 700ms / WiFi 300ms，BLE 占 70%
+ * 未连接(HIGH)：BLE 300ms / WiFi 100ms，BLE 占 75%
+ * 已连接(LOW) ：BLE 250ms / WiFi 100ms，BLE 占 71%
  * ================================================================ */
 static TaskHandle_t s_tdd_task_handle = NULL;
 static volatile bool s_tdd_should_stop = false;
 
-#define TDD_BLE_ACTIVE_MS_HIGH   800
-#define TDD_WIFI_WINDOW_MS_HIGH  200
-#define TDD_BLE_ACTIVE_MS_LOW    700
-#define TDD_WIFI_WINDOW_MS_LOW   300
+#define TDD_BLE_ACTIVE_MS_HIGH   300
+#define TDD_WIFI_WINDOW_MS_HIGH  100
+#define TDD_BLE_ACTIVE_MS_LOW    250
+#define TDD_WIFI_WINDOW_MS_LOW   100
 
 static void tdd_coexist_task(void *arg) {
     (void)arg;
-    ESP_LOGI(TAG, "TDD coexist task started (BLE/WiFi time-division)");
+    ESP_LOGI(TAG, "TDD coexist task started (BLE/WiFi time-division, v2.0.8 short cycle)");
 
     while (!s_tdd_should_stop) {
         uint16_t ble_ms = (s_scan_duty == SCAN_DUTY_HIGH)
@@ -283,19 +284,26 @@ static void tdd_coexist_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(ble_ms));
         if (s_tdd_should_stop) break;
 
-        /* 暂停 BLE 扫描，把射频让给 WiFi */
+        /* 暂停 BLE 扫描，把射频让给 WiFi。
+         * ble_gap_disc_cancel() 是异步的（发送 HCI 命令后立即返回），
+         * DISC_COMPLETE 事件稍后才到，但射频实际上很快就释放了。
+         * 不等待 DISC_COMPLETE，直接进入 WiFi 窗口最大化接收时间。 */
         if (s_scan_running && s_scan_allowed) {
-            ble_gap_disc_cancel();
-            s_scan_running = false;
-
-            /* WiFi 接收窗口（信道轮转任务会在此期间切换信道） */
-            vTaskDelay(pdMS_TO_TICKS(wifi_ms));
-            if (s_tdd_should_stop) break;
-
-            /* 恢复 BLE 扫描 */
-            if (s_scan_allowed) {
-                start_scan();
-                s_scan_running = true;
+            int rc = ble_gap_disc_cancel();
+            if (rc == 0) {
+                s_scan_running = false;
+                /* WiFi 接收窗口（信道轮转任务在此期间切换信道） */
+                vTaskDelay(pdMS_TO_TICKS(wifi_ms));
+                if (s_tdd_should_stop) break;
+                /* 恢复 BLE 扫描（duty 由 set_duty_high/low 设置，TDD 直接用当前值） */
+                if (s_scan_allowed) {
+                    start_scan();
+                    s_scan_running = true;
+                }
+            } else {
+                /* cancel 失败（可能正在重启），短等后重试 */
+                ESP_LOGD(TAG, "disc_cancel rc=%d, retry", rc);
+                vTaskDelay(pdMS_TO_TICKS(50));
             }
         }
     }

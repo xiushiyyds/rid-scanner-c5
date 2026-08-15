@@ -46,7 +46,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.0.7-detector"
+#define CRID_VERSION_STRING "2.0.8-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -262,13 +262,14 @@ static void parser_task(void *pvParameter) {
 
             xSemaphoreGive(mutex);
 
-            /* v2.0.7: DJI 路径也用节流推送 */
+            /* v2.0.8: DJI 路径同样立即发首次，后续 1 秒节流 */
             if (was_new && (uav->basic_id.valid || uav->location.valid)) {
                 json_uav_discovery(uav);
-            }
-            if (uav->basic_id.valid || uav->location.valid) {
+                json_uav_update(uav);
+                uav->last_push_ms = esp_log_timestamp();
+            } else if (uav->basic_id.valid || uav->location.valid) {
                 uint32_t now = esp_log_timestamp();
-                if (now - uav->last_push_ms >= 2000) {
+                if (now - uav->last_push_ms >= 1000) {
                     uav->last_push_ms = now;
                     json_uav_update(uav);
                 }
@@ -386,23 +387,17 @@ static void parser_task(void *pvParameter) {
 
         xSemaphoreGive(mutex);
 
-        /* v2.0.7: 数据推送策略全面修正。
-         *
-         * 之前的问题：
-         *  1. discovery 只在 was_new && basic_id.valid 时发，
-         *     跨MAC合并后 was_new=false，新MAC上先收到的BasicID不会触发discovery。
-         *  2. update 只在 location.valid 时发，如果 RID 广播当前消息包
-         *     不含Location（如只发BasicID/SelfID/System），手机端完全收不到数据。
-         *  3. monitor_task 60秒才推一次uav_status，周期太长。
-         *
-         * 修正后：只要 track 有 basic_id 或 location 任一字段有效就推送 update，
-         * 并对每个 track 做 2 秒节流防止 BLE 队列溢出。 */
+        /* v2.0.8: 数据推送策略。
+         * 新目标立即发 discovery + update（无节流）。
+         * 已有目标 1 秒节流推 update（RID 广播约 1Hz，1s 节流刚好）。
+         * monitor_task 不再单独推 uav_status（由 update 覆盖）。 */
         if (was_new && (uav->basic_id.valid || uav->location.valid)) {
             json_uav_discovery(uav);
-        }
-        if (uav->basic_id.valid || uav->location.valid) {
+            json_uav_update(uav);
+            uav->last_push_ms = esp_log_timestamp();
+        } else if (uav->basic_id.valid || uav->location.valid) {
             uint32_t now = esp_log_timestamp();
-            if (now - uav->last_push_ms >= 2000) {
+            if (now - uav->last_push_ms >= 1000) {
                 uav->last_push_ms = now;
                 json_uav_update(uav);
             }
@@ -419,32 +414,12 @@ static void monitor_task(void *pvParameter) {
     uint32_t loop_count = 0;
     uint32_t last_packets = 0, last_mgmt = 0, last_rid = 0;
     uint32_t last_beacons = 0, last_non_rid = 0;
-    uint32_t tick_count = 0;
 
     while (1) {
-        /* v2.0.7: 每3秒推送活跃目标状态（手机端需要定期刷新），
-         * 每60秒输出一次完整统计报告 */
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        tick_count++;
-        if (tick_count % 20 != 0) {
-            /* 3秒周期：只推送活跃目标状态，不计算统计率 */
-            SemaphoreHandle_t mutex = crid_tracker_get_mutex();
-            if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                uav_track_t *table = crid_tracker_get_table();
-                for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
-                    if (!table[i].active) continue;
-                    if (table[i].basic_id.valid || table[i].location.valid) {
-                        uint32_t now = esp_log_timestamp();
-                        if (now - table[i].last_push_ms >= 2500) {
-                            table[i].last_push_ms = now;
-                            json_uav_status(&table[i]);
-                        }
-                    }
-                }
-                xSemaphoreGive(mutex);
-            }
-            continue;
-        }
+        /* v2.0.8: 每60秒输出一次完整统计报告。
+         * 活跃目标的实时数据由 parser_task 在收到 RID 消息时立即推送，
+         * 不再由 monitor 定期推 uav_status（避免重复推送和 BLE 队列拥塞）。 */
+        vTaskDelay(pdMS_TO_TICKS(60000));
         loop_count++;
 
         sniffer_stats_t *stats = crid_sniffer_get_stats();
@@ -472,11 +447,6 @@ static void monitor_task(void *pvParameter) {
         int active = 0;
         if (xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             active = crid_tracker_get_active_count();
-            uav_track_t *table = crid_tracker_get_table();
-            for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
-                if (!table[i].active) continue;
-                json_uav_status(&table[i]);
-            }
             crid_tracker_cleanup(UAV_TIMEOUT_MS);
             xSemaphoreGive(mutex);
         }
