@@ -130,7 +130,6 @@ static portMUX_TYPE g_ble_line_mux = portMUX_INITIALIZER_UNLOCKED;
  * ================================================================ */
 static int gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
                                     struct ble_gatt_access_ctxt *ctxt, void *arg);
-static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
 static void ble_host_task(void *param);
 static void ble_tx_task(void *param);
@@ -185,63 +184,6 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
         }
     }
     return 0;
-}
-
-/* 服务注册完成回调：此时 GATT 表已构建完毕，可以安全获取 handle。
- *
- * NimBLE 注册顺序：对于每个 characteristic：
- *   1. BLE_GATT_REGISTER_OP_CHR — 注册 characteristic declaration + value
- *   2. BLE_GATT_REGISTER_OP_DSC — 注册 CCCD descriptor（如果有 NOTIFY/INDICATE）
- * 所以在 CHR 回调时 CCCD handle 还不知道，需要在 DSC 回调中记录。 */
-static uint16_t s_pending_tx_val_handle = 0;  /* TX chr 注册后暂存 val_handle */
-
-static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg) {
-    (void)arg;
-    char buf[BLE_UUID_STR_LEN];
-
-    switch (ctxt->op) {
-    case BLE_GATT_REGISTER_OP_SVC:
-        ESP_LOGI(TAG, "Registered svc %s handle=%d",
-                 ble_uuid_to_str(ctxt->svc.svc->uuid, buf),
-                 ctxt->svc.handle);
-        break;
-
-    case BLE_GATT_REGISTER_OP_CHR:
-        ESP_LOGI(TAG, "Registered chr %s def_handle=%d val_handle=%d",
-                 ble_uuid_to_str(ctxt->chr.chr->uuid, buf),
-                 ctxt->chr.def_handle, ctxt->chr.val_handle);
-        /* NUS TX (notify) */
-        if (ble_uuid_cmp(ctxt->chr.chr->uuid, &gatt_svr_chr_nus_tx_uuid.u) == 0) {
-            g_nus_tx_handle = ctxt->chr.val_handle;
-            s_pending_tx_val_handle = ctxt->chr.val_handle;
-            ESP_LOGI(TAG, "NUS TX val_handle=%d (waiting for CCCD)",
-                     g_nus_tx_handle);
-        }
-        /* NUS RX (write) */
-        if (ble_uuid_cmp(ctxt->chr.chr->uuid, &gatt_svr_chr_nus_rx_uuid.u) == 0) {
-            g_nus_rx_handle = ctxt->chr.val_handle;
-            ESP_LOGI(TAG, "NUS RX val_handle=%d", g_nus_rx_handle);
-        }
-        break;
-
-    case BLE_GATT_REGISTER_OP_DSC:
-        ESP_LOGI(TAG, "Registered dsc %s handle=%d",
-                 ble_uuid_to_str(ctxt->dsc.dsc->uuid, buf),
-                 ctxt->dsc.handle);
-        /* CCCD UUID = 0x2902 (16-bit)，紧跟在 TX characteristic value 后面注册 */
-        if (s_pending_tx_val_handle != 0 &&
-            ctxt->dsc.dsc->uuid->type == BLE_UUID_TYPE_16 &&
-            ((const ble_uuid16_t *)ctxt->dsc.dsc->uuid)->value == 0x2902) {
-            g_nus_tx_cccd_handle = ctxt->dsc.handle;
-            ESP_LOGI(TAG, "NUS TX CCCD handle=%d (for val_handle=%d)",
-                     g_nus_tx_cccd_handle, s_pending_tx_val_handle);
-            s_pending_tx_val_handle = 0;
-        }
-        break;
-
-    default:
-        break;
-    }
 }
 
 /* 广播超时回调 */
@@ -549,12 +491,33 @@ ble_on_sync(void)
                  addr_val[2], addr_val[1], addr_val[0]);
     }
 
-    /* v2.0.8: handle 在 gatt_svr_register_cb 中获取，
-     * 不再依赖 ble_gatts_find_chr（在 sync 回调中 GATT 表可能尚未就绪）。
-     * 初始化时清零，register_cb 触发后自动填充。 */
-    g_nus_tx_handle = 0;
-    g_nus_rx_handle = 0;
-    g_nus_tx_cccd_handle = 0;
+    /* v2.0.8: 在 sync 回调中查找 characteristic handle。
+     * NimBLE 在调用 sync_cb 之前已经完成了 ble_gatts_start()，
+     * GATT 表已完全注册，ble_gatts_find_chr 可以安全使用。 */
+    int rc;
+    rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
+                             &gatt_svr_chr_nus_tx_uuid.u,
+                             NULL, &g_nus_tx_handle);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to find NUS TX chr handle (rc=%d)", rc);
+        g_nus_tx_handle = 0;
+    } else {
+        /* CCCD descriptor 紧跟在 characteristic value handle 后面。
+         * GATT 表布局：decl_handle, value_handle, cccd_handle */
+        g_nus_tx_cccd_handle = g_nus_tx_handle + 1;
+        ESP_LOGI(TAG, "NUS TX val_handle=%d cccd_handle=%d",
+                 g_nus_tx_handle, g_nus_tx_cccd_handle);
+    }
+
+    rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
+                             &gatt_svr_chr_nus_rx_uuid.u,
+                             NULL, &g_nus_rx_handle);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to find NUS RX chr handle (rc=%d)", rc);
+        g_nus_rx_handle = 0;
+    } else {
+        ESP_LOGI(TAG, "NUS RX val_handle=%d", g_nus_rx_handle);
+    }
 
     ble_advertise_start();
 
@@ -693,8 +656,6 @@ crid_ble_init(void)
     }
 
     ble_hs_cfg.sync_cb = ble_on_sync;
-    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
-    ble_hs_cfg.gatts_register_arg = NULL;
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
