@@ -184,8 +184,7 @@ static bool g_ble_initialized = false;
 static esp_timer_handle_t g_adv_timer = NULL;
 #define ADV_TIMEOUT_US (60 * 1000 * 1000)  /* 60秒 */
 
-/* lcdfix21: NUS 外设使用的 Extended Adv 实例号（必须在 adv_timeout_cb 前定义） */
-#define NUS_ADV_INSTANCE   0
+/* lcdfix27: 退回 legacy advertising，不再需要 ext_adv instance */
 
 /* ================================================================
  * 数据发送队列 (指针传递，缓冲区从 SPIRAM 分配)
@@ -266,10 +265,10 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-/* 广播超时回调：60秒无人连接则关闭 BLE */
+/* 广播超时回调：60秒无人连接则重启广播 */
 static void adv_timeout_cb(void *arg) {
     ESP_LOGI(TAG, "No BLE connection for 60s, restarting advertising");
-    ble_gap_ext_adv_stop(NUS_ADV_INSTANCE);
+    ble_gap_adv_stop();
     g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     if (g_adv_timer) {
         esp_timer_stop(g_adv_timer);
@@ -381,19 +380,25 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 }
 
 /* ================================================================
- * 广播配置 (lcdfix21)
+ * 广播配置 (lcdfix27)
  *
- * lcdfix21 关键修复：
- *   sdkconfig 打开 CONFIG_BT_NIMBLE_EXT_ADV=y 后，旧版 ble_gap_adv_start()
- *   在 NimBLE 中被编译成直接返回 BLE_HS_ENOTSUP(=8)，导致板子根本没在广播，
- *   手机自然搜不到。必须改用 Extended Advertising 实例 API，并把 legacy_pdu=1
- *   强制走 Legacy PDU（31 字节），保证手机/浏览器兼容性。
+ * lcdfix27 关键修复：
+ *   关闭 CONFIG_BT_NIMBLE_EXT_ADV，退回纯 Legacy Advertising API。
+ *
+ *   根因（esp-nimble 1.8.0 ble_gap.c:2774-2840 已验证）：
+ *   当 BLE_EXT_ADV=y 时，ble_gap_adv_start() 内部会自动调用
+ *   ble_gap_ext_adv_configure() + ble_gap_ext_adv_start()，
+ *   即使 legacy_pdu=1 也走 controller ext_adv 路径。
+ *   ESP32-C5 BLE controller 在 ext_adv_configure 后必现
+ *   r_ble_ll_mem_msys_update assert 崩溃（esp-rs/esp-hal#5454、
+ *   arduino-esp32#12821 均有报告）。
+ *
+ *   解决方案：直接关闭 EXT_ADV，ble_gap_adv_start() 走纯 legacy
+ *   HCI 命令路径（LE Set Advertising Enable），绕过 controller bug。
+ *   crid_ble_scan.c 自动 fallback 到 legacy ble_gap_disc() 扫描。
  * ================================================================ */
 
-static int g_adv_configured = 0;
-/* lcdfix22: 由 ble_hs_id_infer_auto() 推断的实际地址类型。
- * ESP32-C5 可能没有公共地址，硬编码 BLE_OWN_ADDR_PUBLIC 会导致
- * ext_adv_configure 在控制器层静默失败（手机搜不到广播）。*/
+/* lcdfix22: 由 ble_hs_id_infer_auto() 推断的实际地址类型。 */
 static uint8_t g_own_addr_type = BLE_OWN_ADDR_PUBLIC;
 
 static int ble_build_adv_data(uint8_t *out, size_t out_sz)
@@ -438,119 +443,54 @@ ble_advertise_start(void)
 {
     int rc;
 
-    /* 首次启动时配置 Extended Adv 实例 0，legacy_pdu=1 强制 Legacy PDU。
-     * 注意：ble_gap_ext_adv_configure 同一个 instance 只能调用一次，
-     * 断开重连时直接 start 即可，不能重复 configure（会返回 ENOMEM）。 */
-    if (!g_adv_configured) {
-        struct ble_gap_ext_adv_params ext_params;
-        memset(&ext_params, 0, sizeof(ext_params));
-        ext_params.connectable      = 1;
-        ext_params.scannable        = 1;
-        ext_params.legacy_pdu       = 1;   /* 走 Legacy 31 字节 PDU，手机兼容 */
-        ext_params.anonymous        = 0;
-        ext_params.include_tx_power = 0;
-        ext_params.directed         = 0;
-        ext_params.high_duty_directed = 0;
-        ext_params.itvl_min         = BLE_GAP_ADV_ITVL_MS(100);
-        ext_params.itvl_max         = BLE_GAP_ADV_ITVL_MS(150);
-        ext_params.channel_map      = 0;   /* 默认 37/38/39 全用 */
-        ext_params.own_addr_type    = g_own_addr_type;
-        ext_params.filter_policy    = 0;
-        ext_params.primary_phy      = BLE_GAP_LE_PHY_1M;
-        ext_params.secondary_phy    = BLE_GAP_LE_PHY_1M;
-        ext_params.tx_power         = 127; /* 让控制器选默认功率 */
-        ext_params.sid              = 0;
-
-        int8_t selected_tx_power = 0;
-        rc = ble_gap_ext_adv_configure(NUS_ADV_INSTANCE, &ext_params,
-                                        &selected_tx_power,
-                                        ble_gap_event_cb, NULL);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "ext_adv_configure failed (rc=%d)", rc);
-            return;
-        }
-        ESP_LOGI(TAG, "ext_adv_configure OK, selected_tx_power=%d dBm, own_addr_type=%d",
-                 selected_tx_power, g_own_addr_type);
-
-        /* lcdfix24: EXT_ADV 模式下使用 RANDOM 地址时，必须显式为 instance
-         * 设置随机地址，否则 controller 可能不会真正发射广播。
-         * 参照 ESP-IDF ble_multi_adv 示例 ble_multi_adv_set_addr()。
-         * PUBLIC 地址类型不需要此步骤（controller 直接使用公共地址）。 */
-        if (g_own_addr_type == BLE_OWN_ADDR_RANDOM ||
-            g_own_addr_type == BLE_OWN_ADDR_RPA_RANDOM_DEFAULT) {
-            ble_addr_t rnd_addr;
-            /* 从已配置的 identity 地址复制随机地址 */
-            rc = ble_hs_id_copy_addr(BLE_ADDR_RANDOM, rnd_addr.val, NULL);
-            if (rc == 0) {
-                rnd_addr.type = BLE_ADDR_RANDOM;
-                rc = ble_gap_ext_adv_set_addr(NUS_ADV_INSTANCE, &rnd_addr);
-                if (rc != 0) {
-                    ESP_LOGW(TAG, "ble_gap_ext_adv_set_addr failed (rc=%d), continuing anyway", rc);
-                } else {
-                    ESP_LOGI(TAG, "ext_adv instance %d random address set", NUS_ADV_INSTANCE);
-                }
-            } else {
-                ESP_LOGW(TAG, "ble_hs_id_copy_addr(RANDOM) failed (rc=%d)", rc);
-            }
-        }
-
-        /* 设置广播数据 */
-        uint8_t adv_buf[BLE_HS_ADV_MAX_SZ];
-        int adv_len = ble_build_adv_data(adv_buf, sizeof(adv_buf));
-        if (adv_len < 0) {
-            ESP_LOGE(TAG, "build adv data failed (%d)", adv_len);
-            return;
-        }
-        struct os_mbuf *adv_om = ble_hs_mbuf_from_flat(adv_buf, (uint16_t)adv_len);
-        if (!adv_om) {
-            ESP_LOGE(TAG, "adv mbuf alloc failed");
-            return;
-        }
-        rc = ble_gap_ext_adv_set_data(NUS_ADV_INSTANCE, adv_om);
-        os_mbuf_free_chain(adv_om);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "ext_adv_set_data failed (rc=%d)", rc);
-            return;
-        }
-
-        /* 设置扫描应答数据（NUS UUID） */
-        uint8_t rsp_buf[BLE_HS_ADV_MAX_SZ];
-        int rsp_len = ble_build_scan_rsp(rsp_buf, sizeof(rsp_buf));
-        if (rsp_len < 0) {
-            ESP_LOGE(TAG, "build rsp data failed (%d)", rsp_len);
-            return;
-        }
-        struct os_mbuf *rsp_om = ble_hs_mbuf_from_flat(rsp_buf, (uint16_t)rsp_len);
-        if (!rsp_om) {
-            ESP_LOGE(TAG, "rsp mbuf alloc failed");
-            return;
-        }
-        rc = ble_gap_ext_adv_rsp_set_data(NUS_ADV_INSTANCE, rsp_om);
-        os_mbuf_free_chain(rsp_om);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "ext_adv_rsp_set_data failed (rc=%d)", rc);
-            return;
-        }
-
-        g_adv_configured = 1;
-        ESP_LOGI(TAG, "Extended adv instance %d configured (legacy_pdu=1, 100-150ms)",
-                 NUS_ADV_INSTANCE);
+    /* 设置广播数据 */
+    uint8_t adv_buf[BLE_HS_ADV_MAX_SZ];
+    int adv_len = ble_build_adv_data(adv_buf, sizeof(adv_buf));
+    if (adv_len < 0) {
+        ESP_LOGE(TAG, "build adv data failed (%d)", adv_len);
+        return;
     }
-
-    rc = ble_gap_ext_adv_start(NUS_ADV_INSTANCE, 0, 0);
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGE(TAG, "ext_adv_start failed (rc=%d)", rc);
+    rc = ble_gap_adv_set_data(adv_buf, adv_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_set_data failed (rc=%d)", rc);
         return;
     }
 
-    /* lcdfix24: 验证广播是否真正在 controller 层 active */
-    if (ble_gap_ext_adv_active(NUS_ADV_INSTANCE)) {
-        ESP_LOGI(TAG, "Advertising ACTIVE as 'RID-Scanner' (NUS UUID in scan rsp)");
-    } else {
-        ESP_LOGE(TAG, "ext_adv_start returned 0 but instance NOT active!");
+    /* 设置扫描应答数据（NUS UUID） */
+    uint8_t rsp_buf[BLE_HS_ADV_MAX_SZ];
+    int rsp_len = ble_build_scan_rsp(rsp_buf, sizeof(rsp_buf));
+    if (rsp_len < 0) {
+        ESP_LOGE(TAG, "build rsp data failed (%d)", rsp_len);
+        return;
+    }
+    rc = ble_gap_adv_rsp_set_data(rsp_buf, rsp_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_rsp_set_data failed (rc=%d)", rc);
+        return;
     }
 
-    /* 启动 60 秒超时定时器：无人连接则自动关闭广播 */
+    /* 开始 legacy connectable 广播 */
+    struct ble_gap_adv_params adv_params;
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;  /* 可连接非定向 */
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;  /* 通用可发现 */
+    adv_params.itvl_min  = BLE_GAP_ADV_ITVL_MS(100);
+    adv_params.itvl_max  = BLE_GAP_ADV_ITVL_MS(150);
+    adv_params.channel_sp = 0;  /* 所有信道 */
+    adv_params.filter_policy = 0;
+    adv_params.high_duty_cycle = 0;
+    adv_params.own_addr_type = g_own_addr_type;
+
+    rc = ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, ble_gap_event_cb, NULL);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGE(TAG, "ble_gap_adv_start failed (rc=%d)", rc);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Advertising ACTIVE as 'RID-Scanner' (legacy, NUS UUID in scan rsp)");
+
+    /* 启动 60 秒超时定时器：无人连接则自动重启广播 */
     if (g_adv_timer) {
         esp_timer_stop(g_adv_timer);
         esp_timer_delete(g_adv_timer);

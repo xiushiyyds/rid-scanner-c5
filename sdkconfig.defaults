@@ -10,11 +10,66 @@ CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 # Observer 角色是 BLE 扫描（ble_gap_disc）所必需的
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
 
-# lcdfix19：恢复 BLE 5 Extended Advertising 支持。
-# RID 肩灯测试模块走 BLE 5 Coded PHY (Long Range) 广播，
-# 没有 EXT_ADV 就收不到。同时保留 Legacy 回退。
+# lcdfix19：开启 BLE 5 特性支持
 CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
-CONFIG_BT_NIMBLE_EXT_ADV=y
+
+# lcdfix27：关闭 EXT_ADV 以修复 ESP32-C5 BLE controller ext_adv 路径
+# r_ble_ll_mem_msys_update assert 崩溃。
+#
+# 根因（esp-nimble 1.8.0 ble_gap.c:2774-2840 已验证）：
+#   当 BLE_EXT_ADV=y 时，ble_gap_adv_start() 内部会自动调用
+#   ble_gap_ext_adv_configure() + ble_gap_ext_adv_start()，无论应用层
+#   是否直接使用 ext_adv API。C5 controller 在 ext_adv_configure 时
+#   内部 mbuf/msys 池分配失败，触发 assert 崩溃（非返回错误码，不可捕获）。
+#   即使 legacy_pdu=1 也走同一路径。
+#
+# 代价：关闭 EXT_ADV 后，ble_gap_ext_disc() 返回 ENOTSUP，无法使用
+#   Coded PHY (BT5 Long Range) 扫描。代码 (crid_ble_scan.c) 有完整
+#   fallback 到 legacy ble_gap_disc()，覆盖 1M PHY 上所有 ASTM F3411
+#   BLE RID 广播（绝大多数 RID 肩灯/无人机使用 1M PHY）。
+#   后续 ESP-IDF 修复 C5 controller bug 后可重新启用。
+CONFIG_BT_NIMBLE_EXT_ADV=n
+
+# lcdfix27：大幅削减 BLE controller 内存占用，修复 ESP32-C5
+# r_ble_ll_mem_msys_update assert 崩溃。
+# C5 只有 ~130KB 内部 SRAM，默认 NimBLE 配置预留太多。
+
+# 我们的广播数据 < 32 字节，不需要 1650 字节的大 ADV 缓冲。
+# ASTM BLE MessagePack 最大 254 字节，保守设 300 留余量。
+CONFIG_BT_NIMBLE_EXT_ADV_MAX_SIZE=300
+
+# 只需要 1 个 ext_adv 实例
+CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES=1
+
+# 不需要 2M PHY（只用 1M + Coded PHY/Long Range）
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=n
+
+# 不需要周期性广播/同步（RID 用的是普通扩展广播）
+CONFIG_BT_NIMBLE_ENABLE_PERIODIC_ADV=n
+CONFIG_BT_NIMBLE_ENABLE_PERIODIC_SYNC=n
+CONFIG_BT_NIMBLE_MAX_PERIODIC_SYNCS=0
+CONFIG_BT_NIMBLE_MAX_PERIODIC_ADVERTISER_LIST=1
+
+# 只需要 1 个 BLE 连接（单手机控制）
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# 减小 ACL 缓冲区数量（默认24，1连接用不到）
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=8
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT_EFF=8
+# HCI event 缓冲区（默认30+8）
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=8
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARDABLE_COUNT=4
+
+# 减小白名单（默认12）
+CONFIG_BT_NIMBLE_WHITELIST_SIZE=4
+
+# Controller 侧配置（esp32c5 特有）
+# 减小 resolving list
+CONFIG_BT_NIMBLE_LL_RESOLV_LIST_SIZE=4
+
+# msys mbuf 池配置：保持默认（24块128字节 + 24块320字节），
+# 过度削减可能影响 controller 正常工作。
+# 关键是上面削减 controller 静态内存后，msys 池应该够用。
 
 # lcdfix10：NimBLE 内存改回内部 SRAM。
 # 之前放 PSRAM 在 C5 上可能导致 controller 访问延迟/不稳定，
