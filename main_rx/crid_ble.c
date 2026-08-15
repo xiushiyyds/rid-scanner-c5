@@ -135,6 +135,7 @@ static void ble_on_sync(void);
 static void ble_advertise_start(void);
 static void ble_delayed_scan_task(void *arg);
 static void ble_connected_scan_task(void *arg);
+static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
 
 /* ================================================================
  * GATT 服务定义
