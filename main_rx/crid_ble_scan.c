@@ -395,13 +395,11 @@ void crid_ble_scan_set_allowed(bool allowed) {
 void crid_ble_scan_set_duty_high(void) {
     if (s_scan_duty == SCAN_DUTY_HIGH) return;
     s_scan_duty = SCAN_DUTY_HIGH;
-    ESP_LOGI(TAG, "Scan duty -> HIGH (BLE 800ms / WiFi 200ms)");
-    /* TDD 任务会在下一个周期自动应用新的占空比参数，无需重启扫描 */
+    ESP_LOGI(TAG, "Scan duty -> HIGH (BLE 300ms / WiFi 100ms)");
 }
 
 void crid_ble_scan_set_duty_low(void) {
     if (s_scan_duty == SCAN_DUTY_LOW) return;
     s_scan_duty = SCAN_DUTY_LOW;
-    ESP_LOGI(TAG, "Scan duty -> LOW (BLE 700ms / WiFi 300ms)");
-    /* TDD 任务会在下一个周期自动应用新的占空比参数，无需重启扫描 */
+    ESP_LOGI(TAG, "Scan duty -> LOW (BLE 250ms / WiFi 100ms)");
 }

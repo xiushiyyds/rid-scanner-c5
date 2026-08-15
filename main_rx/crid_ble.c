@@ -263,36 +263,27 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         /* 手机写入 CCCD 使能 TX characteristic notification。
-         * v2.0.8: attr_handle 是 CCCD descriptor handle。
-         * 同时匹配 cccd_handle 和 tx_handle（容错不同 NimBLE 版本行为）。 */
+         * v2.0.9: NUS 服务只有 TX 一个 NOTIFY characteristic，
+         * 因此只要 cur_notify==1 就一定是 TX 订阅，
+         * 不依赖 attr_handle 到底是 value handle 还是 CCCD handle
+         * （不同 NimBLE 版本报告行为不一致）。 */
         ESP_LOGI(TAG, "SUBSCRIBE: attr=%d tx_val=%d tx_cccd=%d notify=%d indicate=%d",
                  event->subscribe.attr_handle,
                  g_nus_tx_handle, g_nus_tx_cccd_handle,
                  event->subscribe.cur_notify, event->subscribe.cur_indicate);
 
-        /* 兜底：如果 cccd_handle 没被 register_cb 捕获到，
-         * 但 attr_handle 与 tx_handle 相差 1，也认为是 TX 的 CCCD */
-        bool is_tx_cccd = (event->subscribe.attr_handle == g_nus_tx_cccd_handle) ||
-                          (g_nus_tx_cccd_handle == 0 && g_nus_tx_handle != 0 &&
-                           event->subscribe.attr_handle == g_nus_tx_handle + 1);
-
-        if (is_tx_cccd && event->subscribe.cur_notify == 1) {
-            ESP_LOGI(TAG, "Client subscribed to TX notifications");
-            /* 如果 cccd_handle 之前没拿到，现在学到了 */
-            if (g_nus_tx_cccd_handle == 0) {
+        if (event->subscribe.cur_notify == 1) {
+            /* 学习 CCCD handle（不管它报告的是什么，都记下来用于诊断） */
+            if (event->subscribe.attr_handle != g_nus_tx_handle) {
                 g_nus_tx_cccd_handle = event->subscribe.attr_handle;
-                ESP_LOGI(TAG, "Learned TX CCCD handle=%d", g_nus_tx_cccd_handle);
             }
+            ESP_LOGI(TAG, "Client subscribed to TX notifications (attr=%d)",
+                     event->subscribe.attr_handle);
             g_subscribed = true;
             g_paired = true;
-            const char *pair_ok = "PAIR_OK\n";
-            crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            const char *status = "STATUS:targets:0,gps:searching\n";
-            crid_ble_write_cb(status, strlen(status), NULL);
 
-            /* 延迟 2 秒后以低占空比恢复 BLE RID 扫描，
-             * 给手机留时间做 initial data fetch，不抢射频 */
+            /* v2.0.9: 不在 NimBLE host task 上下文做任何阻塞或延迟操作。
+             * PAIR_OK 发送、状态推送、扫描恢复全部交给独立 task。 */
             xTaskCreate(ble_connected_scan_task, "ble_conn_scan",
                         2048, NULL, 4, NULL);
         }
@@ -433,7 +424,21 @@ ble_advertise_start(void)
  * ================================================================ */
 static void ble_connected_scan_task(void *arg) {
     (void)arg;
-    /* 先停 TDD 和扫描（在独立 task 上下文，不阻塞 NimBLE host） */
+
+    /* v2.0.9: 在独立 task 中发送 PAIR_OK 和 STATUS，
+     * 不阻塞 NimBLE host task。先短等 100ms 让 CCCD 写入完成。 */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        const char *pair_ok = "PAIR_OK\n";
+        crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        const char *status = "STATUS:targets:0,gps:searching\n";
+        crid_ble_write_cb(status, strlen(status), NULL);
+        ESP_LOGI(TAG, "Sent PAIR_OK + STATUS to client");
+    }
+
+    /* 停 TDD 和高占空比扫描（在独立 task 上下文，不阻塞 NimBLE host） */
     crid_ble_scan_stop();
     /* 等 2 秒让手机完成 service discovery + 初始数据交换 */
     vTaskDelay(pdMS_TO_TICKS(2000));
