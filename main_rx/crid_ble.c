@@ -1,9 +1,12 @@
 /**
- * crid_ble.c — BLE NUS 数据通道实现 (detector variant v2.0.0)
+ * crid_ble.c — BLE NUS 数据通道实现 (detector v2.1.0)
  *
  * 使用 NimBLE 实现 Nordic UART Service (NUS) 外设，
  * 所有 JSON 数据通过 BLE 通知发送到已连接的客户端。
  * 纯侦测板：无模拟发射控制，仅保留 SIM_PAIR 配对。
+ *
+ * v2.1.0: 连接后 BLE 扫描不停止，切换为 LOW duty (40%)。
+ * 控制器自动在扫描间隙调度 GATT 连接事件，无需应用层干预。
  */
 
 #include <string.h>
@@ -135,8 +138,8 @@ static void ble_host_task(void *param);
 static void ble_tx_task(void *param);
 static void ble_on_sync(void);
 static void ble_advertise_start(void);
+static void ble_connect_task(void *arg);
 static void ble_delayed_scan_task(void *arg);
-static void ble_connected_scan_task(void *arg);
 static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
 
 /* ================================================================
@@ -219,13 +222,16 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             g_nus_conn_handle = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected, conn_handle=%d", g_nus_conn_handle);
 
-            /* v2.0.8: 不在 NimBLE host task 上下文做阻塞操作。
-             * TDD 停止和扫描恢复交给独立 task 处理，避免死锁。
-             * TDD 任务会在下次循环检测到 s_tdd_should_stop 自动退出，
-             * 即使扫描继续跑一会儿也不影响 GATT（controller 会调度）。 */
             if (g_pair_display_cb) {
                 g_pair_display_cb("RID-Scanner");
             }
+
+            /* v2.1.0: 连接建立后创建独立 task 切换扫描占空比。
+             * BLE 扫描不停，只从 HIGH 80% 切到 LOW 40%。
+             * 40% duty 每 100ms 有 60ms 空隙，GATT service discovery、
+             * CCCD 写入、通知全部由控制器在间隙中自动调度。
+             * 必须在独立 task 中做 stop/restart（不能在 host task 阻塞）。 */
+            xTaskCreate(ble_connect_task, "ble_connect", 2048, NULL, 5, NULL);
 
             /* 宽松连接间隔 30~50ms */
             struct ble_gap_upd_params params = {
@@ -256,36 +262,26 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             g_ble_linebuf_len = 0;
         }
         portEXIT_CRITICAL(&g_ble_line_mux);
-        /* 断开后恢复高占空比连续扫描 */
-        crid_ble_scan_set_duty_high();
+        /* v2.1.0: 断开后恢复 HIGH duty 扫描。
+         * 用 delayed_scan_restart 安全重启（不能在 host task 阻塞）。 */
+        crid_ble_delayed_scan_restart(100);
         ble_advertise_start();
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         /* 手机写入 CCCD 使能 TX characteristic notification。
-         * v2.0.9: NUS 服务只有 TX 一个 NOTIFY characteristic，
-         * 因此只要 cur_notify==1 就一定是 TX 订阅，
-         * 不依赖 attr_handle 到底是 value handle 还是 CCCD handle
-         * （不同 NimBLE 版本报告行为不一致）。 */
-        ESP_LOGI(TAG, "SUBSCRIBE: attr=%d tx_val=%d tx_cccd=%d notify=%d indicate=%d",
+         * v2.1.0: 扫描在 LOW duty 40% 下持续运行，GATT 事件由控制器
+         * 在扫描间隙自动调度，CCCD 写入不会被饿死。 */
+        ESP_LOGI(TAG, "SUBSCRIBE: attr=%d tx_val=%d notify=%d indicate=%d",
                  event->subscribe.attr_handle,
-                 g_nus_tx_handle, g_nus_tx_cccd_handle,
+                 g_nus_tx_handle,
                  event->subscribe.cur_notify, event->subscribe.cur_indicate);
 
         if (event->subscribe.cur_notify == 1) {
-            /* 学习 CCCD handle（不管它报告的是什么，都记下来用于诊断） */
-            if (event->subscribe.attr_handle != g_nus_tx_handle) {
-                g_nus_tx_cccd_handle = event->subscribe.attr_handle;
-            }
             ESP_LOGI(TAG, "Client subscribed to TX notifications (attr=%d)",
                      event->subscribe.attr_handle);
             g_subscribed = true;
             g_paired = true;
-
-            /* v2.0.9: 不在 NimBLE host task 上下文做任何阻塞或延迟操作。
-             * PAIR_OK 发送、状态推送、扫描恢复全部交给独立 task。 */
-            xTaskCreate(ble_connected_scan_task, "ble_conn_scan",
-                        2048, NULL, 4, NULL);
         }
         break;
 
@@ -420,35 +416,55 @@ ble_advertise_start(void)
 }
 
 /* ================================================================
- * 连接后低占空比恢复 BLE 扫描
+ * 连接建立后：切换扫描到 LOW duty → 等手机完成 service discovery
+ * + CCCD → 发 PAIR_OK
+ *
+ * v2.1.0 关键变化：
+ *   - 不停止 BLE 扫描，只切 LOW duty (40%)
+ *   - 整个过程约 800ms（v2.0.10 需要 3.5 秒）
+ *   - 40% duty 下控制器在 scan window 间隙自动处理 GATT 事件
  * ================================================================ */
-static void ble_connected_scan_task(void *arg) {
+static void ble_connect_task(void *arg) {
     (void)arg;
 
-    /* v2.0.9: 在独立 task 中发送 PAIR_OK 和 STATUS，
-     * 不阻塞 NimBLE host task。先短等 100ms 让 CCCD 写入完成。 */
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        const char *pair_ok = "PAIR_OK\n";
-        crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        const char *status = "STATUS:targets:0,gps:searching\n";
-        crid_ble_write_cb(status, strlen(status), NULL);
-        ESP_LOGI(TAG, "Sent PAIR_OK + STATUS to client");
-    }
-
-    /* 停 TDD 和高占空比扫描（在独立 task 上下文，不阻塞 NimBLE host） */
+    /* 第1步：切换扫描占空比到 LOW (40%)。
+     * 先 stop → set_duty_low → delay → start。
+     * stop/start 之间短延迟让控制器完成 cancel。
+     * 此时 BLE 扫描暂停的几十毫秒内，控制器可以立即处理
+     * GATT connection update 和开始 service discovery。 */
     crid_ble_scan_stop();
-    /* 等 2 秒让手机完成 service discovery + 初始数据交换 */
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGI(TAG, "Resuming BLE RID scan (low duty, GATT coexist)");
-        crid_ble_scan_set_duty_low();
-        if (!crid_ble_scan_is_running()) {
-            crid_ble_scan_start();
-        }
+    crid_ble_scan_set_duty_low();
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "Disconnected during setup, aborting connect task");
+        vTaskDelete(NULL);
+        return;
     }
+
+    crid_ble_scan_start();
+    ESP_LOGI(TAG, "BLE scan resumed in LOW duty (40%%) for GATT coexist");
+
+    /* 第2步：等手机完成 service discovery + CCCD 写入。
+     * LOW duty 40% 下，CCCD 写入正常到达。
+     * 手机流程：connect → getPrimaryService → getCharacteristic(TX) →
+     *          startNotifications() → write CCCD → SUBSCRIBE event
+     * 通常 200-500ms，给 500ms 余量。 */
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* 第3步：发 PAIR_OK + STATUS */
+    const char *pair_ok = "PAIR_OK\n";
+    crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    const char *status = "STATUS:targets:0,gps:searching\n";
+    crid_ble_write_cb(status, strlen(status), NULL);
+    ESP_LOGI(TAG, "Sent PAIR_OK + STATUS (subscribed=%d)", g_subscribed);
+
     vTaskDelete(NULL);
 }
 

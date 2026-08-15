@@ -1,10 +1,10 @@
 /**
- * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector variant v2.0.0)
+ * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.1.0)
  *
- * 纯侦测板：WiFi sniffer + BLE 扫描共存，无模拟发射。
+ * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
+ * v2.1.0: 删除 TDD 时分复用，WiFi 不再被应用层打断。
  * WiFi buffer 大幅削减以节省内部 SRAM。
- * 信道轮转：ch6 长驻 3s，ch1/ch11 各 200ms。
- * BLE 扫描持续运行，ESP32 共存硬件自动分时。
+ * 信道轮转：ch6 长驻 800ms，ch1/ch11 各 300ms。
  */
 
 #include <string.h>
@@ -91,7 +91,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                     uint8_t *odid_payload = &ie_ptr[i + 7];
                     uint8_t odid_len = len - 5;
 
-                    if (odid_len < 28) {
+                    /* v2.1.0: 降低最小长度门槛。
+                     * ASTM MessagePack 最小 28B (3B header + 25B msg)。
+                     * GB46750 header 仅 6B (Magic+Ver+Len+Flags)，实际
+                     * mandatory 字段使最小包远大于 6，但不能用 28 门槛
+                     * 阻挡短包。让解析器判断有效性。 */
+                    if (odid_len < 6) {
                         break;
                     }
 
@@ -203,10 +208,10 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ================================================================
- 信道轮转（三信道轮巡 v2.0.8 优化）
+ 信道轮转（三信道轮巡）
 
- 与 TDD 短周期配合：TDD 每 ~400ms 给 WiFi 100ms 窗口。
- 信道轮转周期也缩短，确保每个 WiFi 窗口落在正确信道上。
+ WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
+ 不再依赖应用层 TDD（v2.1.0 删除）。
 
  ch6 驻留 800ms（多数无人机默认信道，偏重），
  ch1/ch11 各驻留 300ms（覆盖非默认信道）。

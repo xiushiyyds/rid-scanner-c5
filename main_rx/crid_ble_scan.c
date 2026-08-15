@@ -1,12 +1,29 @@
 /**
- * crid_ble_scan.c — BLE Remote ID 扫描实现 (detector variant v2.0.0)
+ * crid_ble_scan.c — BLE Remote ID 扫描实现 (detector v2.1.0)
  *
- * 使用 NimBLE host stack 扫描 BLE Legacy 和 Extended Advertising，
+ * 使用 NimBLE host stack 扫描 BLE Legacy Advertising，
  * 匹配 ASTM F3411 / ASD-STAN 分配的 Service UUID 0xFFFA，
- * 提取 OpenDroneID message pack 并投递到 sniffer 队列。
+ * 提取 OpenDroneID / GB46750 message pack 并投递到 sniffer 队列。
  *
- * TDD 时分复用：BLE 扫描与 WiFi sniffer 共享单射频。
- * v2.0.8: 缩短 TDD 周期至 ~400ms，减少 RID 广播漏检。
+ * v2.1.0 架构变更（关键）：
+ *   - 删除应用层 TDD 时分复用任务。TDD 频繁 cancel/restart 扫描会
+ *     干扰 ESP-IDF PTA 硬件共存状态机，是 WiFi total_pkts=0 的根因。
+ *   - BLE 扫描使用 scan_window < scan_interval 占空比，控制器自动在
+ *     间隙调度 GATT 连接事件（与肩灯/手机原理一致）。
+ *   - WiFi/BLE 共存由 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y 的 PTA
+ *     硬件仲裁自动处理，WiFi sniffer 持续运行不被打断。
+ *   - 扫描占空比：
+ *     HIGH（未连接）：window=128*0.625=80ms, itvl=160*0.625=100ms = 80%
+ *     LOW （已连接）：window=64 *0.625=40ms, itvl=160*0.625=100ms = 40%
+ *     40% duty 下每 100ms 有 60ms 空隙，GATT 连接事件(30-50ms间隔,
+ *     3-5ms时长)轻松调度，同时保持 40% BLE RID 捕获率。
+ *
+ * v2.1.0 新增：GB46750-2025 变长包透传。
+ *   find_odid_service_data() 跳过 UUID(2)+AppCode(1)+MsgCounter(1)=4 字节
+ *   后返回的 payload：
+ *     - ASTM:  payload[0] = 0xF0/0xF1/0xF2（单条 25B 或 MessagePack）
+ *     - GB46750: payload[0] = 0xFF（变长，header 6B + content）
+ *   GB46750 包直接透传原始 payload，不包装 ASTM MessagePack 前缀。
  */
 
 #include <string.h>
@@ -31,18 +48,17 @@ static const char *TAG = "RID_BLE_SCAN";
 
 /* ---- 扫描状态 ---- */
 static bool s_scan_running = false;
-static uint8_t s_ext_adv_type = 0;  /* 0=Legacy, 1=Extended */
 
 /* 扫描允许开关（侦测板始终 true，保留供未来使用） */
 static volatile bool s_scan_allowed = true;
 
 /* ---- 扫描占空比模式 ---- */
 typedef enum {
-    SCAN_DUTY_HIGH,    /* 未连接：连续扫描，最大化 RID 捕获率 */
-    SCAN_DUTY_LOW,     /* 已连接：低占空比，给 GATT 通信留射频 */
+    SCAN_DUTY_HIGH,    /* 未连接：80% 占空比，高 RID 捕获率 */
+    SCAN_DUTY_LOW,     /* 已连接：40% 占空比，GATT 连接事件稳定 */
 } scan_duty_t;
 
-static scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;
+static volatile scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;
 
 /* ---- 前向声明 ---- */
 static int ble_scan_gap_event(struct ble_gap_event *event, void *arg);
@@ -51,6 +67,13 @@ static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t
 
 /* ================================================================
  * 从 Advertising data 中提取 ODID 单条消息 (Service Data UUID 0xFFFA)
+ *
+ * BLE Service Data 格式：
+ *   [Len][Type=0x16][UUID_LO][UUID_HI][AppCode=0x0D][MsgCounter][Payload...]
+ *
+ * 返回 Payload 指针（MsgCounter 之后的第一个字节）：
+ *   - ASTM:    0xF0/0xF1/0xF2 开头，单条 25B 或 MessagePack
+ *   - GB46750: 0xFF 开头，变长
  * ================================================================ */
 static const uint8_t *find_odid_service_data(const uint8_t *adv_data, uint8_t adv_len,
                                               uint8_t *out_msg_len) {
@@ -71,6 +94,9 @@ static const uint8_t *find_odid_service_data(const uint8_t *adv_data, uint8_t ad
                     pos += 1 + field_len;
                     continue;
                 }
+                /* ad_data: [UUID_LO][UUID_HI][AppCode][MsgCounter][Payload...]
+                 *          ^0        ^1        ^2        ^3           ^4
+                 * 跳过 4 字节，返回 MsgCounter 之后的 payload。 */
                 *out_msg_len = ad_data_len - 4;
                 return ad_data + 4;
             }
@@ -83,6 +109,11 @@ static const uint8_t *find_odid_service_data(const uint8_t *adv_data, uint8_t ad
 
 /* ================================================================
  * 处理一条广播报告
+ *
+ * 支持三种 payload 格式：
+ *   1. ASTM 单条 25B：包装成 MessagePack [0xF0,25,1,payload]
+ *   2. ASTM MessagePack：0xF? + 25 + count + count×25 直通
+ *   3. GB46750 变长包：0xFF 开头，原样透传给解析器
  * ================================================================ */
 static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t data_len,
                                int8_t rssi, bool is_extended) {
@@ -97,7 +128,17 @@ static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t
     uint8_t pack_len;
     uint8_t pack_buf[3 + 10 * 25];
 
-    if (msg_len == 25) {
+    if (payload[0] == 0xFF) {
+        /* ---- GB46750-2025 变长包 ----
+         * payload 格式: [0xFF][Ver][DataLength][Flags(3B)][Content...]
+         * 直接透传原始 payload，不做 ASTM 包装。
+         * WiFi sniffer 路径投递的 payload 起点与此一致（都是 MsgCounter 之后），
+         * parser_task 无需区分来源。 */
+        if (msg_len < 6) return;  /* GB46750 header = Magic+Ver+Len+Flags = 6B */
+        pack_data = payload;
+        pack_len = msg_len;
+    } else if (msg_len == 25) {
+        /* ---- ASTM 单条消息：包装成 MessagePack ---- */
         pack_buf[0] = 0xF0;
         pack_buf[1] = 25;
         pack_buf[2] = 1;
@@ -107,6 +148,7 @@ static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t
     } else if (msg_len >= 28 && (payload[0] >> 4) == 0xF &&
                payload[1] == 25 && payload[2] >= 1 && payload[2] <= 10 &&
                msg_len >= 3 + payload[2] * 25) {
+        /* ---- ASTM MessagePack（多条） ---- */
         pack_data = payload;
         pack_len = 3 + payload[2] * 25;
     } else {
@@ -180,56 +222,49 @@ static int ble_scan_gap_event(struct ble_gap_event *event, void *arg) {
 }
 
 /* ================================================================
- * 启动扫描
+ * 启动扫描（Legacy passive）
+ *
+ * v2.1.0: 扫描参数根据 s_scan_duty 动态设置。
+ *   HIGH: itvl=160(100ms), window=128(80ms) = 80% 占空比
+ *   LOW:  itvl=160(100ms), window=64 (40ms) = 40% 占空比
+ *
+ * window < itvl 确保控制器在扫描间隙有时间处理 GATT 连接事件。
+ * 这是 BLE 协议标准设计，与肩灯/手机同时扫描+连接的原理相同。
  * ================================================================ */
 static int start_scan(void) {
     struct ble_gap_disc_params disc_params = {0};
     int rc;
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
+    /* EXT_ADV=y 路径（当前 sdkconfig 关闭了 EXT_ADV，不会走到这里） */
     struct ble_gap_ext_disc_params uncoded_params = {0};
-    struct ble_gap_ext_disc_params coded_params = {0};
-
-    uncoded_params.itvl = 200;    /* 160 × 0.625ms = 100ms */
-    uncoded_params.window = 20;   /* 80 × 0.625ms = 50ms (50% duty) */
+    uncoded_params.itvl = 160;
+    uncoded_params.window = (s_scan_duty == SCAN_DUTY_HIGH) ? 128 : 64;
     uncoded_params.passive = 1;
-
-    coded_params.itvl = 200;
-    coded_params.window = 20;
-    coded_params.passive = 1;
 
     rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC,
                           0, 0, 0, 0, 0,
-                          &uncoded_params,
-                          &coded_params,
+                          &uncoded_params, NULL,
                           ble_scan_gap_event, NULL);
-
     if (rc == 0) {
-        s_ext_adv_type = 1;
-        ESP_LOGI(TAG, "BLE Extended scan started (1M + Coded PHY, 10%% duty)");
+        ESP_LOGI(TAG, "BLE Extended scan started (duty=%s)",
+                 s_scan_duty == SCAN_DUTY_HIGH ? "HIGH 80%" : "LOW 40%");
         return 0;
     }
-
     ESP_LOGW(TAG, "Extended scan failed (%d), falling back to legacy", rc);
 #else
-    ESP_LOGI(TAG, "BLE_EXT_ADV not enabled, using legacy scan");
+    ESP_LOGD(TAG, "BLE_EXT_ADV=n, using legacy scan");
 #endif
 
-    /* Legacy 扫描参数根据连接状态动态调整：
-     * - 未连接(HIGH)：window=itvl=160 → 100ms 连续扫描，最大化 RID 捕获
-     * - 已连接(LOW) ：window=96/itvl=160 → 60ms/100ms = 60% 占空比。
-     *   v2.0.7: 从40%提到60%。GATT通知是突发小包（<20字节），
-     *   BLE控制器会在scan window间隙自动调度，60%占空比下实测不丢通知，
-     *   RID捕获率从40%提升到60%，更接近专用肩灯的灵敏度。 */
     memset(&disc_params, 0, sizeof(disc_params));
     if (s_scan_duty == SCAN_DUTY_HIGH) {
-        disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
-        disc_params.window = 160;         /* 160 × 0.625ms = 100ms (100% 连续) */
-        ESP_LOGI(TAG, "BLE Legacy scan started (100%% continuous duty, passive)");
+        disc_params.itvl = 160;           /* 100ms */
+        disc_params.window = 128;         /* 80ms = 80% duty */
+        ESP_LOGI(TAG, "BLE scan started (HIGH duty 80%%, window=80ms/itvl=100ms)");
     } else {
-        disc_params.itvl = 160;           /* 100ms interval */
-        disc_params.window = 96;          /* 60ms listen = 60% duty */
-        ESP_LOGI(TAG, "BLE Legacy scan started (60%% duty, GATT coexist)");
+        disc_params.itvl = 160;           /* 100ms */
+        disc_params.window = 64;          /* 40ms = 40% duty */
+        ESP_LOGI(TAG, "BLE scan started (LOW duty 40%%, window=40ms/itvl=100ms, GATT coexist)");
     }
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
@@ -239,88 +274,11 @@ static int start_scan(void) {
     rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
                       &disc_params, ble_scan_gap_event, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start BLE legacy scan: %d", rc);
+        ESP_LOGE(TAG, "Failed to start BLE scan: %d", rc);
         return rc;
     }
 
-    s_ext_adv_type = 0;
     return 0;
-}
-
-/* ================================================================
- * TDD 时分复用（v2.0.7 引入，v2.0.8 优化周期）
- *
- * ESP32-C5 只有一个 2.4GHz 射频，BLE 连续扫描时 WiFi sniffer 被饿死。
- * TDD 让 BLE 定期短暂暂停，WiFi 获得接收窗口。
- *
- * v2.0.8 优化：周期从 1000ms 缩短到 ~330ms。
- * RID 广播间隔通常 100ms~1s，短周期能显著降低漏检概率：
- *   - BLE 300ms 活跃足以覆盖 3 个广播间隔
- *   - WiFi 100ms 窗口在每个信道轮转周期内能多次命中
- *   - 频繁切换不影响 GATT（连接事件由 controller 独立调度）
- *
- * 未连接(HIGH)：BLE 300ms / WiFi 100ms，BLE 占 75%
- * 已连接(LOW) ：BLE 250ms / WiFi 100ms，BLE 占 71%
- * ================================================================ */
-static TaskHandle_t s_tdd_task_handle = NULL;
-static volatile bool s_tdd_should_stop = false;
-
-#define TDD_BLE_ACTIVE_MS_HIGH   300
-#define TDD_WIFI_WINDOW_MS_HIGH  100
-#define TDD_BLE_ACTIVE_MS_LOW    250
-#define TDD_WIFI_WINDOW_MS_LOW   100
-
-static void tdd_coexist_task(void *arg) {
-    (void)arg;
-    ESP_LOGI(TAG, "TDD coexist task started (BLE/WiFi time-division, v2.0.8 short cycle)");
-
-    while (!s_tdd_should_stop) {
-        uint16_t ble_ms = (s_scan_duty == SCAN_DUTY_HIGH)
-                          ? TDD_BLE_ACTIVE_MS_HIGH : TDD_BLE_ACTIVE_MS_LOW;
-        uint16_t wifi_ms = (s_scan_duty == SCAN_DUTY_HIGH)
-                           ? TDD_WIFI_WINDOW_MS_HIGH : TDD_WIFI_WINDOW_MS_LOW;
-
-        /* BLE 扫描活跃窗口 */
-        vTaskDelay(pdMS_TO_TICKS(ble_ms));
-        if (s_tdd_should_stop) break;
-
-        /* 暂停 BLE 扫描，把射频让给 WiFi。
-         * ble_gap_disc_cancel() 是异步的（发送 HCI 命令后立即返回），
-         * DISC_COMPLETE 事件稍后才到，但射频实际上很快就释放了。
-         * 不等待 DISC_COMPLETE，直接进入 WiFi 窗口最大化接收时间。 */
-        if (s_scan_running && s_scan_allowed) {
-            int rc = ble_gap_disc_cancel();
-            if (rc == 0) {
-                s_scan_running = false;
-                /* WiFi 接收窗口（信道轮转任务在此期间切换信道） */
-                vTaskDelay(pdMS_TO_TICKS(wifi_ms));
-                if (s_tdd_should_stop) break;
-                /* 恢复 BLE 扫描（duty 由 set_duty_high/low 设置，TDD 直接用当前值） */
-                if (s_scan_allowed) {
-                    start_scan();
-                    s_scan_running = true;
-                }
-            } else {
-                /* cancel 失败（可能正在重启），短等后重试 */
-                ESP_LOGD(TAG, "disc_cancel rc=%d, retry", rc);
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
-    }
-
-    s_tdd_task_handle = NULL;
-    vTaskDelete(NULL);
-}
-
-static void tdd_coexist_start(void) {
-    if (s_tdd_task_handle != NULL) return;
-    s_tdd_should_stop = false;
-    xTaskCreate(tdd_coexist_task, "tdd_coex", 2048, NULL, 5, &s_tdd_task_handle);
-}
-
-static void tdd_coexist_stop(void) {
-    if (s_tdd_task_handle == NULL) return;
-    s_tdd_should_stop = true;
 }
 
 /* ================================================================
@@ -328,10 +286,8 @@ static void tdd_coexist_stop(void) {
  * ================================================================ */
 
 esp_err_t crid_ble_scan_init(void) {
-    ESP_LOGI(TAG, "BLE RID scanner init (detector, TDD coexist with WiFi)");
+    ESP_LOGI(TAG, "BLE RID scanner init (v2.1.0, PTA coexist, no TDD)");
     s_scan_running = false;
-    /* v2.0.7: 启动 TDD 时分复用任务，BLE/WiFi 共享单射频 */
-    tdd_coexist_start();
     return ESP_OK;
 }
 
@@ -362,23 +318,15 @@ esp_err_t crid_ble_scan_start(void) {
     }
 
     s_scan_running = true;
-    /* v2.0.7: 重启 TDD 时分复用任务 */
-    tdd_coexist_start();
     return ESP_OK;
 }
 
 void crid_ble_scan_stop(void) {
-    /* 停 TDD 任务，防止它在我们 stop 后又把扫描拉起来 */
-    tdd_coexist_stop();
-    /* 等待 TDD 任务退出 */
-    for (int i = 0; i < 20 && s_tdd_task_handle != NULL; i++) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
     if (s_scan_running) {
         ble_gap_disc_cancel();
         s_scan_running = false;
     }
-    ESP_LOGI(TAG, "BLE scan stopped (TDD coexist halted)");
+    ESP_LOGI(TAG, "BLE scan stopped");
 }
 
 bool crid_ble_scan_is_running(void) {
@@ -392,14 +340,28 @@ void crid_ble_scan_set_allowed(bool allowed) {
     }
 }
 
+/* ================================================================
+ * 占空比切换
+ *
+ * 注意：这些函数只修改 s_scan_duty 标志。如果扫描正在运行，
+ * 调用者（通常是独立 task，不是 NimBLE host task）需要 stop + start
+ * 才能让新参数生效。set_duty_high/low 本身不做 cancel/restart，
+ * 因为不能在 NimBLE host task 上下文做阻塞操作。
+ *
+ * 典型用法（在独立 task 中）：
+ *   crid_ble_scan_set_duty_low();
+ *   crid_ble_scan_stop();
+ *   vTaskDelay(pdMS_TO_TICKS(50));
+ *   crid_ble_scan_start();
+ * ================================================================ */
 void crid_ble_scan_set_duty_high(void) {
     if (s_scan_duty == SCAN_DUTY_HIGH) return;
     s_scan_duty = SCAN_DUTY_HIGH;
-    ESP_LOGI(TAG, "Scan duty -> HIGH (BLE 300ms / WiFi 100ms)");
+    ESP_LOGI(TAG, "Scan duty -> HIGH (80% window=80ms/itvl=100ms)");
 }
 
 void crid_ble_scan_set_duty_low(void) {
     if (s_scan_duty == SCAN_DUTY_LOW) return;
     s_scan_duty = SCAN_DUTY_LOW;
-    ESP_LOGI(TAG, "Scan duty -> LOW (BLE 250ms / WiFi 100ms)");
+    ESP_LOGI(TAG, "Scan duty -> LOW (40% window=40ms/itvl=100ms, GATT coexist)");
 }

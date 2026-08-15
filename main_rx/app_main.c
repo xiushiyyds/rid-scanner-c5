@@ -1,15 +1,24 @@
 /**
- * app_main.c — Remote ID Detector 主入口 (v2.0.0-detector)
+ * app_main.c — Remote ID Detector 主入口 (v2.1.0-detector)
  *
  * ESP32-C5 Remote ID 纯侦测板固件
  * Standards: ASTM F3411-22a / ASD-STAN prEN 4709-002 / GB 42590-2023 / GB 46750-2025
  *
- * 架构：
- *   - crid_sniffer:   Wi-Fi 混杂模式抓包
- *   - crid_ble_scan:  BLE RID 广播扫描（连续运行）
- *   - crid_parser:    opendroneid 库解码
+ * 架构 (v2.1.0):
+ *   - crid_sniffer:   Wi-Fi 混杂模式抓包（持续运行，PTA 硬件共存）
+ *   - crid_ble_scan:  BLE RID 广播扫描（window<itvl 占空比，GATT 自动共存）
+ *     · 未连接：HIGH 80% duty（window=80ms/itvl=100ms）
+ *     · 已连接：LOW 40% duty（window=40ms/itvl=100ms，GATT 事件在间隙调度）
+ *   - crid_parser:    多协议解码（GB46750 → GB42590 → ASTM → DJI）
  *   - crid_tracker:   无人机追踪表
  *   - lcd_display:    ST7789 LCD 信息展示
+ *
+ * v2.1.0 关键架构变更：
+ *   - 删除应用层 TDD 时分复用。TDD 频繁 cancel/restart 扫描干扰 PTA
+ *     硬件共存，是 WiFi total_pkts=0 的根因。
+ *   - WiFi/BLE 共存由 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y 的 PTA 仲裁。
+ *   - BLE GATT 连接事件由控制器在 scan window 间隙自动调度。
+ *   - GB46750 BLE/WiFi 路径修复，支持变长包透传。
  *
  * 纯侦测板：只做 RID 信号侦测和显示，无模拟发射。
  * WiFi init 在所有任务创建之后，使用自定义 config 削减 buffer。
@@ -46,7 +55,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.0.9-detector"
+#define CRID_VERSION_STRING "2.1.0-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__

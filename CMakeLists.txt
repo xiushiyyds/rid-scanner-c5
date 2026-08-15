@@ -14,8 +14,8 @@ cmake_minimum_required(VERSION 3.16)
 #   components/          — 子组件(lcd_display, crid_simulator 等)
 # ================================================================
 
-# v1.3: 版本号
-set(CRID_VERSION "2.0.9")
+# v2.1.0: PTA 硬件共存 + GB46750 BLE 路径修复 + 删除 TDD
+set(CRID_VERSION "2.1.0")
 
 message(STATUS ">>> Building NekolunaRID Scanner v${CRID_VERSION}")
 

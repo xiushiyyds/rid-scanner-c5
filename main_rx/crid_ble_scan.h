@@ -1,9 +1,15 @@
 /**
- * crid_ble_scan.h — BLE Remote ID 扫描模块 (detector variant)
+ * crid_ble_scan.h — BLE Remote ID 扫描模块 (detector v2.1.0)
  *
- * 扫描蓝牙 Legacy Advertising 和 BT5 Extended Advertising (Coded PHY / Long Range)，
- * 匹配 ASTM F3411 标准 Service UUID 0xFFFA，提取 ODID payload 投递到 sniffer 队列。
- * 纯侦测板：BLE 连续扫描，无 TDD 分时。
+ * 扫描蓝牙 Legacy Advertising，匹配 ASTM F3411 Service UUID 0xFFFA，
+ * 提取 ODID / GB46750 payload 投递到 sniffer 队列。
+ *
+ * v2.1.0: 删除 TDD 时分复用。BLE 扫描使用 window < itvl 占空比，
+ * 控制器自动在间隙调度 GATT 连接事件。WiFi/BLE 共存由 PTA 硬件仲裁。
+ *
+ * 占空比：
+ *   HIGH（未连接）：80%，window=80ms / itvl=100ms
+ *   LOW （已连接）：40%，window=40ms / itvl=100ms
  */
 
 #ifndef CRID_BLE_SCAN_H
@@ -29,8 +35,12 @@ void crid_ble_scan_set_allowed(bool allowed);
 
 /**
  * 切换扫描占空比模式。
- * HIGH：未连接时连续扫描（~100% duty），最大化 RID 捕获。
- * LOW：已连接时低占空比（~20% duty），给 GATT 通信留射频。
+ * HIGH：未连接，80% 占空比，高 RID 捕获。
+ * LOW： 已连接，40% 占空比，GATT 连接事件稳定。
+ *
+ * 注意：这些函数只设置标志。如果扫描正在运行，调用者（必须在独立
+ * task 中，不能在 NimBLE host task 回调里）需要 stop → delay → start
+ * 让新参数生效。
  */
 void crid_ble_scan_set_duty_high(void);
 void crid_ble_scan_set_duty_low(void);
