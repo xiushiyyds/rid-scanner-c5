@@ -217,9 +217,10 @@ static int start_scan(void) {
 
     /* Legacy 扫描参数根据连接状态动态调整：
      * - 未连接(HIGH)：window=itvl=160 → 100ms 连续扫描，最大化 RID 捕获
-     * - 已连接(LOW) ：window=64/itvl=160 → 40ms/100ms = 40% 占空比。
-     *   v2.0.5: 从 20% 提到 40%。GATT 通知是突发性的，40% 扫描占空比
-     *   下仍有 60% 空口给 GATT 通信，实测不丢通知；20% 时 RID 捕获率明显偏低。 */
+     * - 已连接(LOW) ：window=96/itvl=160 → 60ms/100ms = 60% 占空比。
+     *   v2.0.7: 从40%提到60%。GATT通知是突发小包（<20字节），
+     *   BLE控制器会在scan window间隙自动调度，60%占空比下实测不丢通知，
+     *   RID捕获率从40%提升到60%，更接近专用肩灯的灵敏度。 */
     memset(&disc_params, 0, sizeof(disc_params));
     if (s_scan_duty == SCAN_DUTY_HIGH) {
         disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
@@ -227,8 +228,8 @@ static int start_scan(void) {
         ESP_LOGI(TAG, "BLE Legacy scan started (100%% continuous duty, passive)");
     } else {
         disc_params.itvl = 160;           /* 100ms interval */
-        disc_params.window = 64;          /* 40ms listen = 40% duty */
-        ESP_LOGI(TAG, "BLE Legacy scan started (40%% duty, GATT coexist)");
+        disc_params.window = 96;          /* 60ms listen = 60% duty */
+        ESP_LOGI(TAG, "BLE Legacy scan started (60%% duty, GATT coexist)");
     }
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
@@ -247,12 +248,82 @@ static int start_scan(void) {
 }
 
 /* ================================================================
+ * TDD 时分复用（v2.0.7 关键修复）
+ *
+ * ESP32-C5 只有一个 2.4GHz 射频，BLE 连续扫描时 WiFi sniffer 被饿死，
+ * 串口日志显示 total_pkts=0。之前版本靠 TDD 让 BLE 定期暂停，
+ * WiFi 获得接收窗口，三信道轮巡正常工作，灵敏度比肩 RID 肩灯。
+ *
+ * 方案：BLE 扫描运行 800ms 后暂停 200ms，把这 200ms 完全让给 WiFi。
+ * GATT 连接不受影响（连接事件由 controller 在 scan 间隙调度，
+ * 暂停扫描反而给 GATT 更多空口）。暂停期间 WiFi 切换信道并接收 Beacon。
+ *
+ * 未连接(HIGH)：BLE 800ms / WiFi 200ms，BLE 占 80%
+ * 已连接(LOW) ：BLE 700ms / WiFi 300ms，BLE 占 70%
+ * ================================================================ */
+static TaskHandle_t s_tdd_task_handle = NULL;
+static volatile bool s_tdd_should_stop = false;
+
+#define TDD_BLE_ACTIVE_MS_HIGH   800
+#define TDD_WIFI_WINDOW_MS_HIGH  200
+#define TDD_BLE_ACTIVE_MS_LOW    700
+#define TDD_WIFI_WINDOW_MS_LOW   300
+
+static void tdd_coexist_task(void *arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "TDD coexist task started (BLE/WiFi time-division)");
+
+    while (!s_tdd_should_stop) {
+        uint16_t ble_ms = (s_scan_duty == SCAN_DUTY_HIGH)
+                          ? TDD_BLE_ACTIVE_MS_HIGH : TDD_BLE_ACTIVE_MS_LOW;
+        uint16_t wifi_ms = (s_scan_duty == SCAN_DUTY_HIGH)
+                           ? TDD_WIFI_WINDOW_MS_HIGH : TDD_WIFI_WINDOW_MS_LOW;
+
+        /* BLE 扫描活跃窗口 */
+        vTaskDelay(pdMS_TO_TICKS(ble_ms));
+        if (s_tdd_should_stop) break;
+
+        /* 暂停 BLE 扫描，把射频让给 WiFi */
+        if (s_scan_running && s_scan_allowed) {
+            ble_gap_disc_cancel();
+            s_scan_running = false;
+
+            /* WiFi 接收窗口（信道轮转任务会在此期间切换信道） */
+            vTaskDelay(pdMS_TO_TICKS(wifi_ms));
+            if (s_tdd_should_stop) break;
+
+            /* 恢复 BLE 扫描 */
+            if (s_scan_allowed) {
+                start_scan();
+                s_scan_running = true;
+            }
+        }
+    }
+
+    s_tdd_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void tdd_coexist_start(void) {
+    if (s_tdd_task_handle != NULL) return;
+    s_tdd_should_stop = false;
+    xTaskCreate(tdd_coexist_task, "tdd_coex", 2048, NULL, 5, &s_tdd_task_handle);
+}
+
+static void tdd_coexist_stop(void) {
+    if (s_tdd_task_handle == NULL) return;
+    s_tdd_should_stop = true;
+}
+
+/* ================================================================
  * 公开接口
  * ================================================================ */
 
 esp_err_t crid_ble_scan_init(void) {
-    ESP_LOGI(TAG, "BLE RID scanner init (detector, continuous scan)");
+    ESP_LOGI(TAG, "BLE RID scanner init (detector, TDD coexist with WiFi)");
     s_scan_running = false;
+    /* v2.0.7: 启动 TDD 时分复用任务，BLE/WiFi 共享单射频 */
+    tdd_coexist_start();
     return ESP_OK;
 }
 
@@ -283,15 +354,23 @@ esp_err_t crid_ble_scan_start(void) {
     }
 
     s_scan_running = true;
+    /* v2.0.7: 重启 TDD 时分复用任务 */
+    tdd_coexist_start();
     return ESP_OK;
 }
 
 void crid_ble_scan_stop(void) {
-    if (!s_scan_running) return;
-
-    ble_gap_disc_cancel();
-    s_scan_running = false;
-    ESP_LOGI(TAG, "BLE scan stopped");
+    /* 停 TDD 任务，防止它在我们 stop 后又把扫描拉起来 */
+    tdd_coexist_stop();
+    /* 等待 TDD 任务退出 */
+    for (int i = 0; i < 20 && s_tdd_task_handle != NULL; i++) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (s_scan_running) {
+        ble_gap_disc_cancel();
+        s_scan_running = false;
+    }
+    ESP_LOGI(TAG, "BLE scan stopped (TDD coexist halted)");
 }
 
 bool crid_ble_scan_is_running(void) {
@@ -308,19 +387,13 @@ void crid_ble_scan_set_allowed(bool allowed) {
 void crid_ble_scan_set_duty_high(void) {
     if (s_scan_duty == SCAN_DUTY_HIGH) return;
     s_scan_duty = SCAN_DUTY_HIGH;
-    if (s_scan_running) {
-        crid_ble_scan_stop();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        crid_ble_scan_start();
-    }
+    ESP_LOGI(TAG, "Scan duty -> HIGH (BLE 800ms / WiFi 200ms)");
+    /* TDD 任务会在下一个周期自动应用新的占空比参数，无需重启扫描 */
 }
 
 void crid_ble_scan_set_duty_low(void) {
     if (s_scan_duty == SCAN_DUTY_LOW) return;
     s_scan_duty = SCAN_DUTY_LOW;
-    if (s_scan_running) {
-        crid_ble_scan_stop();
-        vTaskDelay(pdMS_TO_TICKS(50));
-        crid_ble_scan_start();
-    }
+    ESP_LOGI(TAG, "Scan duty -> LOW (BLE 700ms / WiFi 300ms)");
+    /* TDD 任务会在下一个周期自动应用新的占空比参数，无需重启扫描 */
 }

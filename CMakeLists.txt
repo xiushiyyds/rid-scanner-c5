@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.16)
 # ================================================================
 
 # v1.3: 版本号
-set(CRID_VERSION "2.0.6")
+set(CRID_VERSION "2.0.7")
 
 message(STATUS ">>> Building NekolunaRID Scanner v${CRID_VERSION}")
 

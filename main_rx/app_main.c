@@ -46,7 +46,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.0.6-detector"
+#define CRID_VERSION_STRING "2.0.7-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -262,8 +262,17 @@ static void parser_task(void *pvParameter) {
 
             xSemaphoreGive(mutex);
 
-            if (was_new) json_uav_discovery(uav);
-            json_uav_update(uav);
+            /* v2.0.7: DJI 路径也用节流推送 */
+            if (was_new && (uav->basic_id.valid || uav->location.valid)) {
+                json_uav_discovery(uav);
+            }
+            if (uav->basic_id.valid || uav->location.valid) {
+                uint32_t now = esp_log_timestamp();
+                if (now - uav->last_push_ms >= 2000) {
+                    uav->last_push_ms = now;
+                    json_uav_update(uav);
+                }
+            }
             continue;
         }
 
@@ -377,12 +386,27 @@ static void parser_task(void *pvParameter) {
 
         xSemaphoreGive(mutex);
 
-        if (was_new && uav->basic_id.valid) json_uav_discovery(uav);
-        /* 只要有位置数据就推送给网页，不再要求 BasicID(SN) 就绪。
-         * 无人机 BasicID/Location/SelfID/System 消息轮转广播，可能先收到 Location
-         * 再收到 BasicID，旧逻辑导致前若干秒网页列表为空。
-         * 有 SN 用 SN 做 ID，无 SN 用 MAC 做 ID（后续收到 SN 时 tracker 会合并）。 */
-        if (uav->location.valid) json_uav_update(uav);
+        /* v2.0.7: 数据推送策略全面修正。
+         *
+         * 之前的问题：
+         *  1. discovery 只在 was_new && basic_id.valid 时发，
+         *     跨MAC合并后 was_new=false，新MAC上先收到的BasicID不会触发discovery。
+         *  2. update 只在 location.valid 时发，如果 RID 广播当前消息包
+         *     不含Location（如只发BasicID/SelfID/System），手机端完全收不到数据。
+         *  3. monitor_task 60秒才推一次uav_status，周期太长。
+         *
+         * 修正后：只要 track 有 basic_id 或 location 任一字段有效就推送 update，
+         * 并对每个 track 做 2 秒节流防止 BLE 队列溢出。 */
+        if (was_new && (uav->basic_id.valid || uav->location.valid)) {
+            json_uav_discovery(uav);
+        }
+        if (uav->basic_id.valid || uav->location.valid) {
+            uint32_t now = esp_log_timestamp();
+            if (now - uav->last_push_ms >= 2000) {
+                uav->last_push_ms = now;
+                json_uav_update(uav);
+            }
+        }
     }
 }
 
@@ -395,9 +419,32 @@ static void monitor_task(void *pvParameter) {
     uint32_t loop_count = 0;
     uint32_t last_packets = 0, last_mgmt = 0, last_rid = 0;
     uint32_t last_beacons = 0, last_non_rid = 0;
+    uint32_t tick_count = 0;
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
+        /* v2.0.7: 每3秒推送活跃目标状态（手机端需要定期刷新），
+         * 每60秒输出一次完整统计报告 */
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        tick_count++;
+        if (tick_count % 20 != 0) {
+            /* 3秒周期：只推送活跃目标状态，不计算统计率 */
+            SemaphoreHandle_t mutex = crid_tracker_get_mutex();
+            if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                uav_track_t *table = crid_tracker_get_table();
+                for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
+                    if (!table[i].active) continue;
+                    if (table[i].basic_id.valid || table[i].location.valid) {
+                        uint32_t now = esp_log_timestamp();
+                        if (now - table[i].last_push_ms >= 2500) {
+                            table[i].last_push_ms = now;
+                            json_uav_status(&table[i]);
+                        }
+                    }
+                }
+                xSemaphoreGive(mutex);
+            }
+            continue;
+        }
         loop_count++;
 
         sniffer_stats_t *stats = crid_sniffer_get_stats();

@@ -385,6 +385,7 @@ typedef struct {
     // 统计
     uint32_t msg_count;                 // 累计消息数
     uint32_t first_seen_ms;             // 首次发现时间
+    uint32_t last_push_ms;              // v2.0.7: 上次推送给手机的时间（节流用）
 
     // 地理围栏告警状态
     uint8_t  alert_level;       // alert_level_t: 0=无告警, 1=超高, 2=禁飞区, 3=机场净空区, 4=管制空域

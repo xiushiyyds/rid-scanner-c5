@@ -39,6 +39,9 @@ static const char *TAG = "WIFI_SNIFFER";
  ================================================================ */
 static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     g_stats.total_packets++;
+    if (g_stats.total_packets == 1) {
+        ESP_LOGI(TAG, "✓ First WiFi packet received! Sniffer is working.");
+    }
     if (type != WIFI_PKT_MGMT) return;
     g_stats.mgmt_frames++;
 
