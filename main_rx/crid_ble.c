@@ -391,6 +391,10 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
  * ================================================================ */
 
 static int g_adv_configured = 0;
+/* lcdfix22: 由 ble_hs_id_infer_auto() 推断的实际地址类型。
+ * ESP32-C5 可能没有公共地址，硬编码 BLE_OWN_ADDR_PUBLIC 会导致
+ * ext_adv_configure 在控制器层静默失败（手机搜不到广播）。*/
+static uint8_t g_own_addr_type = BLE_OWN_ADDR_PUBLIC;
 
 static int ble_build_adv_data(uint8_t *out, size_t out_sz)
 {
@@ -450,7 +454,7 @@ ble_advertise_start(void)
         ext_params.itvl_min         = BLE_GAP_ADV_ITVL_MS(100);
         ext_params.itvl_max         = BLE_GAP_ADV_ITVL_MS(150);
         ext_params.channel_map      = 0;   /* 默认 37/38/39 全用 */
-        ext_params.own_addr_type    = BLE_OWN_ADDR_PUBLIC;
+        ext_params.own_addr_type    = g_own_addr_type;
         ext_params.filter_policy    = 0;
         ext_params.primary_phy      = BLE_GAP_LE_PHY_1M;
         ext_params.secondary_phy    = BLE_GAP_LE_PHY_1M;
@@ -564,8 +568,24 @@ ble_on_sync(void)
 {
     ESP_LOGI(TAG, "NimBLE host synced");
 
+    /* lcdfix22: 必须先推断实际可用的地址类型。
+     * ESP32-C5 可能没有烧录公共地址，ble_hs_util_ensure_addr(0) 会自动
+     * 生成一个静态随机地址；ble_hs_id_infer_auto 据此返回正确的类型。
+     * 不做这步而硬编码 BLE_OWN_ADDR_PUBLIC，ext_adv_configure 可能在
+     * 控制器层失败，手机完全搜不到广播。 */
+    int rc = ble_hs_id_infer_auto(0, &g_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed (rc=%d)", rc);
+    } else {
+        uint8_t addr_val[6] = {0};
+        ble_hs_id_copy_addr(g_own_addr_type, addr_val, NULL);
+        ESP_LOGI(TAG, "BLE address type=%d addr=%02x:%02x:%02x:%02x:%02x:%02x",
+                 g_own_addr_type, addr_val[5], addr_val[4], addr_val[3],
+                 addr_val[2], addr_val[1], addr_val[0]);
+    }
+
     /* 查找 TX characteristic 句柄（通知从此发送） */
-    int rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
+    rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
                                  &gatt_svr_chr_nus_tx_uuid.u,
                                  NULL, &g_nus_tx_handle);
     if (rc != 0) {

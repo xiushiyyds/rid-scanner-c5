@@ -50,9 +50,13 @@ bool crid_parser_decode_astm(uav_track_t *uav, const uint8_t *data, uint8_t len)
         return false;
     }
 
-    /* 协议版本：0x0 = ASTM F3411, 0x1 = GB42590
-     * 这里只处理 ASTM (proto_ver == 0)，GB42590 由专门模块处理 */
-    if (proto_ver != 0x00) {
+    /* 协议版本：0x0 = ASTM F3411-19 (v1)
+     *           0x1 = ASD-STAN / ASTM F3411-22a draft
+     *           0x2 = ASTM F3411-22a (v2, 正式发布版本)
+     * 实测肩灯发送 0xF2 (ver=2)，之前只接受 0x0 导致全部被拒绝、SN 空。
+     * 这些版本的消息体格式完全一致（25字节/条），可以统一解码。 */
+    if (proto_ver > 0x02) {
+        ESP_LOGD(TAG, "Unsupported proto_ver=%d", proto_ver);
         return false;
     }
 
