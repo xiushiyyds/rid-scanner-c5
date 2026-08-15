@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
@@ -42,7 +43,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix24"
+#define CRID_VERSION_STRING "1.9.9-lcdfix25"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -924,16 +925,22 @@ void app_main(void) {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
     }
 
-    // 5. 初始化 Wi-Fi sniffer（在 LCD 之后，避免 SRAM 被 WiFi 抢占）
-    ret = crid_sniffer_init();
-    if (ret != ESP_OK) {
-        json_error("RID_MAIN", "Sniffer init failed!");
-        return;
-    }
+    // 5. lcdfix25: 先初始化 BLE，再初始化 WiFi sniffer。
+    //    BLE controller 需要大块连续内部 SRAM，WiFi sniffer 的 esp_wifi_init/start
+    //    会占用大量内部 DMA 内存，若先初始化 WiFi，BLE controller 会因
+    //    ESP_ERR_NO_MEM (257) 初始化失败。官方 coex 示例均为先 BLE 后 WiFi。
+    ESP_LOGI("RID_MAIN", "Before BLE init - free heap: %u, internal free: %u, largest block: %u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
-    // 6. 初始化 BLE NUS (NimBLE，内存分配在 SPIRAM)
     ret = crid_ble_init();
     if (ret != ESP_OK) {
+        ESP_LOGE("RID_MAIN", "BLE init failed: %s (free heap=%u, internal=%u, largest=%u)",
+                 esp_err_to_name(ret),
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         json_warning("RID_MAIN", "BLE init failed (non-fatal)");
     } else {
         // 注册模拟器控制回调（多目标版）
@@ -950,6 +957,13 @@ void app_main(void) {
         // 实际扫描在 NimBLE host sync 后由 crid_ble.c 的 sync 回调触发
         crid_ble_scan_init();
         json_debug("RID_MAIN", "BLE RID scanner initialized (will start on host sync)");
+    }
+
+    // 6. 初始化 Wi-Fi sniffer（在 BLE 之后）
+    ret = crid_sniffer_init();
+    if (ret != ESP_OK) {
+        json_error("RID_MAIN", "Sniffer init failed!");
+        return;
     }
 
     // 7. 创建任务
