@@ -82,6 +82,25 @@ static sim_action_cb_t s_sim_start_cb = NULL;
 static sim_action_cb_t s_sim_stop_cb = NULL;
 static sim_mode_cb_t s_sim_mode_cb = NULL;
 
+/* lcdfix28: 页面切换回调，进入新页面后通知 app_main 做射频互斥 */
+static lcd_page_change_cb_t s_page_change_cb = NULL;
+
+void lcd_display_register_page_change_cb(lcd_page_change_cb_t cb) {
+    s_page_change_cb = cb;
+}
+
+/* lcdfix28: 统一页面切换入口。所有改页面的地方都走这里，
+ * 确保只在页面真正变化时触发一次 page_change 回调。 */
+static void set_page_internal(lcd_page_t p) {
+    if (p >= LCD_PAGE_COUNT) return;
+    if (p == s_page) return;
+    s_page = p;
+    s_scroll_offset = 0;
+    if (s_page_change_cb) {
+        s_page_change_cb(p);
+    }
+}
+
 /* lcdfix16: GPS 状态回调（由 app_main 注入，避免 lcd_display 组件
  * 反向依赖 main_rx/gps_module.h 造成组件循环依赖）。
  * 返回 true=有定位；输出经纬度/海拔/卫星数。 */
@@ -1177,10 +1196,9 @@ static void refresh_task(void *arg)
                     s_selection = (s_selection - 1 + active) % active;
                 } else if (key == LCD_KEY_SELECT) {
                     s_detail_sel = s_selection;
-                    s_page = LCD_PAGE_DETAIL;
+                    set_page_internal(LCD_PAGE_DETAIL);
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_HOME;
-                    s_scroll_offset = 0;
+                    set_page_internal(LCD_PAGE_HOME);
                 }
             } else if (s_page == LCD_PAGE_DETAIL) {
                 /* 详情页：User短按=下一个目标，长按=上一个目标；Boot短按=返回列表，长按=主页 */
@@ -1189,14 +1207,16 @@ static void refresh_task(void *arg)
                 } else if (key == LCD_KEY_PREV && active > 0) {
                     s_detail_sel = (s_detail_sel - 1 + active) % active;
                 } else if (key == LCD_KEY_SELECT) {
-                    s_page = LCD_PAGE_LIST;
                     s_selection = s_detail_sel;
+                    set_page_internal(LCD_PAGE_LIST);
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_HOME;
-                    s_scroll_offset = 0;
+                    set_page_internal(LCD_PAGE_HOME);
                 }
             } else if (s_page == LCD_PAGE_SIM_CONFIG) {
-                /* 模拟配置页：User短按=切换模式，Boot短按=启动/停止模拟；长按=返回主页 */
+                /* lcdfix28: 模拟配置页
+                 *   User短按/长按 = 切换飞行模式
+                 *   Boot短按 = 启动发射，启动后自动跳到状态页
+                 *   Boot长按 = 返回主页（page_change 回调会停掉未发射的模拟器并恢复侦测） */
                 if (key == LCD_KEY_NEXT) {
                     int new_mode = (s_sim_info.sim_flight_mode + 1) % 3;
                     s_sim_info.sim_flight_mode = (uint8_t)new_mode;
@@ -1207,46 +1227,44 @@ static void refresh_task(void *arg)
                     if (s_sim_mode_cb) s_sim_mode_cb(new_mode);
                 } else if (key == LCD_KEY_SELECT) {
                     if (s_sim_info.is_sim_running) {
+                        /* 正在发射：短按停止，回到主页恢复侦测 */
                         if (s_sim_stop_cb) s_sim_stop_cb();
+                        set_page_internal(LCD_PAGE_HOME);
                     } else {
+                        /* 启动发射，切到状态页看 TX 计数 */
                         if (s_sim_start_cb) s_sim_start_cb();
+                        set_page_internal(LCD_PAGE_SIM_STATUS);
                     }
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_HOME;
-                    s_scroll_offset = 0;
+                    set_page_internal(LCD_PAGE_HOME);
                 }
             } else if (s_page == LCD_PAGE_SIM_STATUS) {
-                /* 模拟状态页：Boot短按=停止并返回，长按=主页 */
+                /* 模拟状态页：Boot短按=停止并回主页，Boot长按=主页 */
                 if (key == LCD_KEY_SELECT) {
                     if (s_sim_info.is_sim_running && s_sim_stop_cb)
                         s_sim_stop_cb();
-                    s_page = LCD_PAGE_HOME;
+                    set_page_internal(LCD_PAGE_HOME);
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_HOME;
+                    set_page_internal(LCD_PAGE_HOME);
                 }
             } else {
-                /* 主页按键逻辑（lcdfix14 优化）：
-                 *   User短按 = 列表（有目标进列表，无目标提示扫描中）
-                 *   User长按 = 模拟配置（手动进入模拟器）
-                 *   Boot短按 = 列表（有目标进列表，无目标停在主页提示）
-                 *   Boot长按 = 模拟配置
-                 * 这样不会因为没目标就误进模拟器，模拟器需要明确长按才能进入。 */
+                /* 主页按键逻辑（lcdfix28）：
+                 *   User短按 = 列表（有目标进列表，无目标停在主页提示扫描中）
+                 *   User长按 = 模拟配置（进入模拟器配置，自动暂停侦测）
+                 *   Boot短按 = 列表
+                 *   Boot长按 = 模拟配置 */
                 if (key == LCD_KEY_NEXT) {
                     if (active > 0) {
-                        s_page = LCD_PAGE_LIST;
+                        set_page_internal(LCD_PAGE_LIST);
                     }
-                    /* 无目标时停留在主页（状态栏会显示搜索中） */
                 } else if (key == LCD_KEY_PREV) {
-                    s_page = LCD_PAGE_SIM_CONFIG;
-                    s_scroll_offset = 0;
+                    set_page_internal(LCD_PAGE_SIM_CONFIG);
                 } else if (key == LCD_KEY_SELECT) {
                     if (active > 0) {
-                        s_page = LCD_PAGE_LIST;
+                        set_page_internal(LCD_PAGE_LIST);
                     }
-                    /* 无目标时停留在主页 */
                 } else if (key == LCD_KEY_BACK) {
-                    s_page = LCD_PAGE_SIM_CONFIG;
-                    s_scroll_offset = 0;
+                    set_page_internal(LCD_PAGE_SIM_CONFIG);
                 }
             }
         }
@@ -1454,7 +1472,7 @@ void lcd_display_send_key(lcd_key_event_t key) {
 }
 
 void lcd_display_set_page(lcd_page_t p) {
-    if (p < LCD_PAGE_COUNT) { s_page = p; s_scroll_offset = 0; }
+    set_page_internal(p);
 }
 
 lcd_page_t lcd_display_get_page(void) { return s_page; }

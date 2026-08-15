@@ -44,7 +44,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix27"
+#define CRID_VERSION_STRING "1.9.9-lcdfix28"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -93,15 +93,96 @@ static volatile device_mode_t s_device_mode = MODE_SCAN;
  * 再短按Boot才真正切到AP发射。停止/断连时清除。 */
 static volatile bool s_sim_armed = false;
 
-/* 模式切换互斥锁 */
-static SemaphoreHandle_t s_mode_mutex = NULL;
+/* ================================================================
+ * lcdfix28: 页面驱动的射频模式互斥
+ *
+ * ESP32-C5 只有一个 Wi-Fi radio，BLE 扫描、WiFi sniffer、WiFi AP 发射
+ * 三者不能高效共存。按用户要求，以 LCD 当前页面作为模式锚点：
+ *
+ *   HOME / LIST / DETAIL  → 侦测模式：BLE 扫描 + WiFi sniffer 全开，
+ *                           模拟器停止。射频专心抓无人机 RID。
+ *   SIM_CONFIG            → 模拟待命：停 BLE 扫描 + WiFi sniffer，
+ *                           但不启动 AP（用户还在配参数）。
+ *   SIM_STATUS            → 模拟发射：停侦测，sim 正在 AP TX。
+ *
+ * 进入 SIM 页时停侦测；离开 SIM 页（回 HOME 等侦测页）时停模拟器、
+ * 恢复侦测。BLE NUS 连接本身（手机连板子控制）始终保持，不受影响。
+ * ================================================================ */
+
+/* 侦测射频是否处于活动状态（BLE scan + WiFi sniffer） */
+static volatile bool s_detect_active = true;
+
+static esp_err_t detect_stop(void) {
+    if (!s_detect_active) return ESP_OK;
+    ESP_LOGI("MODE", "Detect STOP: halting BLE scan + WiFi sniffer");
+    crid_sniffer_stop_channel_hold();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    crid_ble_scan_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    crid_sniffer_deinit();
+    vTaskDelay(pdMS_TO_TICKS(300));
+    s_detect_active = false;
+    return ESP_OK;
+}
+
+static esp_err_t detect_start(void) {
+    if (s_detect_active) return ESP_OK;
+    ESP_LOGI("MODE", "Detect START: WiFi sniffer + BLE scan");
+    esp_err_t ret = crid_sniffer_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE("MODE", "Sniffer re-init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    crid_sniffer_start_channel_hold();
+    crid_ble_scan_start();
+    s_detect_active = true;
+    return ESP_OK;
+}
+
+/* 主动把当前 sim 状态推给已连接的手机 */
+static void push_sim_status_to_phone(void) {
+    char buf[256];
+    sim_state_t state = sim_get_state();
+    const char *state_str;
+    switch (state) {
+        case SIM_STATE_IDLE:    state_str = "idle"; break;
+        case SIM_STATE_RUNNING: state_str = "running"; break;
+        case SIM_STATE_STOPPED: state_str = "stopped"; break;
+        default:                state_str = "unknown"; break;
+    }
+    const char *mode_str;
+    if (state == SIM_STATE_RUNNING) {
+        mode_str = "simulate";
+    } else if (s_sim_armed) {
+        mode_str = "armed";
+    } else {
+        mode_str = "scan";
+    }
+    double lat = s_sim_config.base_lat, lon = s_sim_config.base_lon;
+    float heading = 0;
+    if (state == SIM_STATE_RUNNING) {
+        sim_get_current_position(&lat, &lon, &heading);
+    }
+    snprintf(buf, sizeof(buf),
+             "{\"cmd\":\"sim_status\",\"state\":\"%s\",\"armed\":%s,"
+             "\"targets\":%d,\"lat\":%.6f,\"lon\":%.6f,\"heading\":%.1f,"
+             "\"channel\":%d,\"mode\":\"%s\",\"tx_power\":%d,\"tx_count\":%u,"
+             "\"device_mode\":\"%s\"}\n",
+             state_str, s_sim_armed ? "true" : "false",
+             s_sim_config.target_count, lat, lon, heading,
+             s_sim_config.channel,
+             sim_flight_mode_name(s_sim_config.flight_mode),
+             s_sim_config.tx_power, (unsigned)sim_get_tx_count(),
+             mode_str);
+    crid_ble_write_cb(buf, strlen(buf), NULL);
+}
 
 /* 模拟器配置 */
 static sim_config_t s_sim_config;
 
 /**
- * 切换到模拟模式
- * 停止 sniffer → 停止 BLE 数据回调 → 初始化并启动模拟器
+ * 切换到模拟发射模式（lcdfix28：侦测已由页面回调停掉，这里只负责 AP）
+ * 停止侦测 → sim_init → sim_start
  * @param target_count 目标数量 (0=使用上次配置, 1~64)
  */
 static esp_err_t switch_to_simulate_mode(int target_count) {
@@ -118,30 +199,15 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     ESP_LOGI("MODE", "Switching to SIMULATE mode (targets=%d)...",
              s_sim_config.target_count);
 
-    /* lcdfix15: 先停信道保持任务，再停 sniffer，否则信道保持任务
-     * 在 wifi deinit 后还会调 esp_wifi_set_channel() 干扰后续 AP 初始化 */
-    crid_sniffer_stop_channel_hold();
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    /* lcdfix17: 切到模拟模式前必须停掉 BLE 扫描。
-     * BLE observer 持续占用射频，AP 模式 esp_wifi_start 会和它抢
-     * 空口，导致 AP Beacon 发不出去或 80211_tx 失败。 */
-    crid_ble_scan_stop();
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    crid_sniffer_deinit();
-    /* lcdfix16: 给 WiFi 控制器足够时间完全释放。
-     * esp_wifi_deinit() 是异步的，底层 controller 有时需要数百毫秒
-     * 才能真正退出，过早调 sim_wifi_init 的 esp_wifi_init 会因为
-     * 状态机还在 STOPPING 而失败或看门狗。500ms 足够稳定。 */
-    vTaskDelay(pdMS_TO_TICKS(500));
+    /* 确保侦测射频已停（页面进入 SIM 页时应已停，这里幂等兜底） */
+    detect_stop();
+    /* 给 WiFi 控制器足够时间完全释放后再 init AP */
+    vTaskDelay(pdMS_TO_TICKS(400));
 
     esp_err_t ret = sim_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim init failed: %s", esp_err_to_name(ret));
-        crid_ble_scan_start();  /* 恢复 BLE 扫描 */
-        crid_sniffer_init();
-        crid_sniffer_start_channel_hold();
+        detect_start();
         return ret;
     }
 
@@ -149,20 +215,19 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim start failed: %s", esp_err_to_name(ret));
         sim_wifi_deinit();
-        crid_ble_scan_start();  /* 恢复 BLE 扫描 */
-        crid_sniffer_init();
-        crid_sniffer_start_channel_hold();
+        detect_start();
         return ret;
     }
 
     s_device_mode = MODE_SIMULATE;
+    s_sim_armed = true;
     ESP_LOGI("MODE", "Now in SIMULATE mode (%d targets)", s_sim_config.target_count);
+    push_sim_status_to_phone();
     return ESP_OK;
 }
 
 /**
- * 切换到扫描模式
- * 停止模拟器 → 重新初始化 sniffer → 恢复 BLE 数据回调
+ * 切换到侦测模式（lcdfix28：停模拟器 + 恢复 BLE 扫描/WiFi sniffer）
  */
 static esp_err_t switch_to_scan_mode(void) {
     if (s_device_mode == MODE_SCAN) {
@@ -173,23 +238,17 @@ static esp_err_t switch_to_scan_mode(void) {
     ESP_LOGI("MODE", "Switching to SCAN mode...");
 
     sim_stop();
-    /* lcdfix16: sim_stop 内部已经 delay 100ms 等 TX 任务退出，
-     * 这里再给控制器一点时间从 AP 模式完全释放。 */
     vTaskDelay(pdMS_TO_TICKS(400));
 
-    esp_err_t ret = crid_sniffer_init();
+    esp_err_t ret = detect_start();
     if (ret != ESP_OK) {
-        ESP_LOGE("MODE", "Sniffer re-init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    crid_sniffer_start_channel_hold();
-
-    /* lcdfix17: 恢复 BLE RID 扫描（模拟模式期间停掉了） */
-    crid_ble_scan_start();
-
     s_device_mode = MODE_SCAN;
+    s_sim_armed = false;
     ESP_LOGI("MODE", "Now in SCAN mode");
+    push_sim_status_to_phone();
     return ESP_OK;
 }
 
@@ -625,8 +684,10 @@ static void monitor_task(void *pvParameter) {
  * ================================================================ */
 
 typedef enum {
-    MODE_OP_START = 1,
-    MODE_OP_STOP  = 2,
+    MODE_OP_START = 1,   /* 启动模拟发射（sim_init + sim_start） */
+    MODE_OP_STOP  = 2,   /* 停模拟器，恢复侦测 */
+    MODE_OP_ENTER_SIM = 3,  /* 进入 SIM 页：只停侦测，不启动 AP（配参数阶段） */
+    MODE_OP_EXIT_SIM  = 4,  /* 离开 SIM 页回到侦测页：若在发射则停掉，恢复侦测 */
 } mode_op_t;
 
 typedef struct {
@@ -636,17 +697,37 @@ typedef struct {
 
 static QueueHandle_t s_mode_queue = NULL;
 
+/* 串行化所有射频重配操作，避免 WiFi init/deinit 与 sim_start 并发 */
+static SemaphoreHandle_t s_rf_mutex = NULL;
+
 static void mode_switch_task(void *arg) {
     mode_msg_t msg;
     while (1) {
         if (xQueueReceive(s_mode_queue, &msg, portMAX_DELAY) == pdTRUE) {
-            if (xSemaphoreTake(s_mode_mutex, portMAX_DELAY) == pdTRUE) {
-                if (msg.op == MODE_OP_START) {
+            if (xSemaphoreTake(s_rf_mutex, portMAX_DELAY) == pdTRUE) {
+                switch (msg.op) {
+                case MODE_OP_START:
                     switch_to_simulate_mode(msg.target_count);
-                } else {
-                    switch_to_scan_mode();
+                    break;
+                case MODE_OP_STOP:
+                case MODE_OP_EXIT_SIM:
+                    /* 若正在发射，先停模拟器；侦测由 detect_start 恢复 */
+                    if (s_device_mode == MODE_SIMULATE) {
+                        switch_to_scan_mode();
+                    } else {
+                        /* 只是在配置页待过、没发射：恢复侦测即可 */
+                        detect_start();
+                        s_sim_armed = false;
+                        push_sim_status_to_phone();
+                    }
+                    break;
+                case MODE_OP_ENTER_SIM:
+                    /* 进入模拟配置/状态页：停掉侦测，把射频让给 AP 发射。
+                     * 不在此处启动 AP，等用户在配置页按 Boot 或手机发 SIM_START。 */
+                    detect_stop();
+                    break;
                 }
-                xSemaphoreGive(s_mode_mutex);
+                xSemaphoreGive(s_rf_mutex);
             }
         }
     }
@@ -658,27 +739,38 @@ static void post_mode_op(mode_op_t op, int count) {
     xQueueSend(s_mode_queue, &msg, 0);
 }
 
-/* BLE"启用模拟"：只武装，不直接发射。真正发射由板子Boot键触发。 */
+/* lcdfix28: 手机"启用模拟"直接启动发射（不再需要板子二次按 Boot）。
+ * 启动后把 LCD 切到 SIM_STATUS 页，让用户看到 TX 计数。 */
 static void sim_ble_start_handler(int target_count) {
     if (target_count > 0) {
         if (target_count > SIM_MAX_TARGETS) target_count = SIM_MAX_TARGETS;
-        if (s_mode_mutex) xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
         s_sim_config.target_count = target_count;
-        if (s_mode_mutex) xSemaphoreGive(s_mode_mutex);
     }
-    /* 如果已经在发射，保持发射；否则只标记 armed，等待Boot键 */
     if (s_device_mode == MODE_SIMULATE && sim_get_state() == SIM_STATE_RUNNING) {
         ESP_LOGI("MODE", "SIM already running, apply config only");
         return;
     }
-    s_sim_armed = true;
-    ESP_LOGI("MODE", "SIM armed by phone; press BOOT on device to start TX");
+    /* 确保射频已切到模拟侧。LCD 切页会触发 ENTER_SIM（detect_stop）；
+     * 若已在 SIM 页但侦测还在活动（异常路径），手动补投 ENTER_SIM。
+     * 队列 FIFO 保证 ENTER_SIM 先于 START 执行。 */
+    lcd_page_t cur = lcd_display_get_page();
+    if (cur != LCD_PAGE_SIM_CONFIG && cur != LCD_PAGE_SIM_STATUS) {
+        lcd_display_set_page(LCD_PAGE_SIM_STATUS);
+    } else if (s_detect_active) {
+        post_mode_op(MODE_OP_ENTER_SIM, 0);
+    }
+    post_mode_op(MODE_OP_START, target_count);
 }
 static void sim_ble_stop_handler(void) {
     s_sim_armed = false;
     if (s_device_mode == MODE_SIMULATE) {
         post_mode_op(MODE_OP_STOP, 0);
+    } else if (!s_detect_active) {
+        /* 在配置页没发射就点了停止：恢复侦测 */
+        post_mode_op(MODE_OP_EXIT_SIM, 0);
     }
+    /* 回到主页 */
+    lcd_display_set_page(LCD_PAGE_HOME);
 }
 
 /**
@@ -686,30 +778,25 @@ static void sim_ble_stop_handler(void) {
  */
 static void sim_ble_config_handler(double lat, double lon, int mode, int channel,
                                     int count, int tx_power) {
-    if (s_mode_mutex) xSemaphoreTake(s_mode_mutex, portMAX_DELAY);
+    if (xSemaphoreTake(s_rf_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        s_sim_config.base_lat = lat;
+        s_sim_config.base_lon = lon;
+        s_sim_config.flight_mode = (sim_flight_mode_t)mode;
+        s_sim_config.channel = (uint8_t)channel;
 
-    s_sim_config.base_lat = lat;
-    s_sim_config.base_lon = lon;
-    s_sim_config.flight_mode = (sim_flight_mode_t)mode;
-    s_sim_config.channel = (uint8_t)channel;
+        if (count > 0) {
+            if (count > SIM_MAX_TARGETS) count = SIM_MAX_TARGETS;
+            s_sim_config.target_count = count;
+        }
+        if (tx_power > 0) {
+            s_sim_config.tx_power = (int8_t)tx_power;
+        }
 
-    /* count > 0 时更新目标数量 */
-    if (count > 0) {
-        if (count > SIM_MAX_TARGETS) count = SIM_MAX_TARGETS;
-        s_sim_config.target_count = count;
+        if (s_device_mode == MODE_SIMULATE && sim_get_state() == SIM_STATE_RUNNING) {
+            sim_update_config(&s_sim_config);
+        }
+        xSemaphoreGive(s_rf_mutex);
     }
-
-    /* tx_power > 0 时更新发射功率 */
-    if (tx_power > 0) {
-        s_sim_config.tx_power = (int8_t)tx_power;
-    }
-
-    /* 如果模拟器正在运行，实时更新配置 */
-    if (s_device_mode == MODE_SIMULATE && sim_get_state() == SIM_STATE_RUNNING) {
-        sim_update_config(&s_sim_config);
-    }
-
-    if (s_mode_mutex) xSemaphoreGive(s_mode_mutex);
 
     ESP_LOGI("MODE", "SIM config updated: lat=%.4f lon=%.4f mode=%d ch=%d "
              "targets=%d tx_power=%d",
@@ -738,12 +825,12 @@ static void sim_ble_status_handler(char *buf, size_t buf_size) {
         lon = s_sim_config.base_lon;
     }
 
-    /* lcdfix19: 网页"启用模拟"只是 armed，设备模式仍为 scan；
-     * 真正切到 simulate 是Boot键触发 switch_to_simulate_mode 后。 */
+    /* lcdfix28: device_mode 反映当前射频状态。
+     * running=正在发射；armed=在模拟配置页（侦测已停，待发射）；scan=侦测中。 */
     const char *mode_str;
     if (state == SIM_STATE_RUNNING) {
         mode_str = "simulate";
-    } else if (s_sim_armed) {
+    } else if (!s_detect_active) {
         mode_str = "armed";
     } else {
         mode_str = "scan";
@@ -811,19 +898,15 @@ static void gps_report_task(void *arg) {
     }
 }
 
-/* LCD 按键回调包装：sim_ble_start_handler 接受 count 参数，LCD 调用时传0。
- * lcdfix15: 这些回调在 lcd_refresh task 上下文执行，
- * 不能直接做 WiFi 重配（会阻塞 UI 刷新甚至栈溢出重启），
- * 统一投递到 mode_switch_task 异步处理。 */
+/* LCD 按键回调：在 SIM_CONFIG 页按 Boot 启动/停止发射。
+ * lcdfix28: 去掉"必须先手机武装"限制——在配置页直接 Boot 即可发射，
+ * 手机和板子都能独立控制。WiFi 重配投递到 mode_switch_task 异步执行。 */
 static void lcd_sim_start_handler(void) {
-    /* lcdfix19: 发射必须先由手机网页"启用模拟"武装，
-     * 再由板子Boot键触发，避免误发射。 */
-    if (!s_sim_armed) {
-        ESP_LOGW("MODE", "BOOT start ignored: SIM not armed by phone");
-        return;
+    if (s_device_mode == MODE_SIMULATE && sim_get_state() == SIM_STATE_RUNNING) {
+        post_mode_op(MODE_OP_STOP, 0);
+    } else {
+        post_mode_op(MODE_OP_START, 0);
     }
-    s_sim_armed = false;
-    post_mode_op(MODE_OP_START, 0);
 }
 static void lcd_sim_stop_handler(void) {
     sim_ble_stop_handler();
@@ -832,6 +915,18 @@ static void lcd_sim_mode_handler(int mode) {
     /* 用当前配置更新 mode */
     sim_ble_config_handler(s_sim_config.base_lat, s_sim_config.base_lon,
                            mode, (int)s_sim_config.channel, 0, 0);
+}
+
+/* lcdfix28: 页面切换回调（在 LCD 按键任务上下文，不能阻塞）。
+ * 进 SIM 页 → 投递 ENTER_SIM 停侦测；离开 SIM 页 → 投递 EXIT_SIM 恢复。 */
+static void lcd_page_change_handler(lcd_page_t new_page) {
+    ESP_LOGI("MODE", "LCD page changed -> %d", (int)new_page);
+    if (new_page == LCD_PAGE_SIM_CONFIG || new_page == LCD_PAGE_SIM_STATUS) {
+        post_mode_op(MODE_OP_ENTER_SIM, 0);
+    } else {
+        /* HOME / LIST / DETAIL：离开模拟，恢复侦测 */
+        post_mode_op(MODE_OP_EXIT_SIM, 0);
+    }
 }
 
 /* lcdfix16: 提供给 LCD 状态栏的 GPS 回调。
@@ -854,10 +949,10 @@ void app_main(void) {
     // 设置数据流回调：UAV 数据同时输出到 stdout（USB CDC）和 UART1
     json_set_data_write_cb(uart_data_write_cb, NULL);
 
-    // 初始化模拟器配置（默认值）和模式切换互斥锁
+    // 初始化模拟器配置（默认值）和射频重配互斥锁
     sim_get_default_config(&s_sim_config);
-    s_mode_mutex = xSemaphoreCreateMutex();
-    s_mode_queue = xQueueCreate(4, sizeof(mode_msg_t));
+    s_rf_mutex = xSemaphoreCreateMutex();
+    s_mode_queue = xQueueCreate(6, sizeof(mode_msg_t));
     /* lcdfix16: 栈从 4096 扩到 8192。
      * switch_to_simulate_mode 会同步调用 esp_wifi_init/deinit + NimBLE stop/start，
      * 调用栈深，4096 会栈溢出撞 InterruptWatchdog，表现为按第二次才重启。 */
@@ -963,6 +1058,8 @@ void app_main(void) {
             lcd_sim_stop_handler,
             lcd_sim_mode_handler
         );
+        /* lcdfix28: 注册页面切换回调，实现射频模式互斥 */
+        lcd_display_register_page_change_cb(lcd_page_change_handler);
         /* lcdfix16: 注册 GPS 状态提供回调（状态栏 GPS 图标用） */
         lcd_display_register_gps_provider(lcd_gps_provider);
         /* lcdfix19: 注册当前扫描信道回调（1/6/11 跳频） */

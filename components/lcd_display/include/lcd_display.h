@@ -164,6 +164,16 @@ void lcd_display_register_sim_callbacks(sim_action_cb_t start,
                                          sim_mode_cb_t cycle_mode);
 
 /**
+ * lcdfix28: 页面切换回调。
+ * 进入新页面后触发，app_main 据此做射频模式互斥：
+ *   - 进入 SIM_CONFIG/SIM_STATUS：停 BLE 扫描 + WiFi sniffer，准备/进行 AP 发射
+ *   - 进入 HOME/LIST/DETAIL：停模拟器，恢复 BLE 扫描 + WiFi sniffer
+ * 注意：此回调在按键任务上下文调用，阻塞操作（WiFi 重配）必须异步投递。
+ */
+typedef void (*lcd_page_change_cb_t)(lcd_page_t new_page);
+void lcd_display_register_page_change_cb(lcd_page_change_cb_t cb);
+
+/**
  * 读取电池电压（通过 AXP2602）
  * @param voltage_mv  输出电压指针（mV）
  * @return 0 成功, -1 失败
