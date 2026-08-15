@@ -40,6 +40,14 @@ static const char *TAG = "RID_BLE_SCAN";
 static bool s_scan_running = false;
 static uint8_t s_ext_adv_type = 0;  /* 0=Legacy, 1=Extended */
 
+/* lcdfix28: 扫描允许开关。
+ * app_main 在进入模拟发射页（detect_stop）时置 false，
+ * 离开模拟页（detect_start）时置 true。
+ * BLE 连接/断开事件里的 crid_ble_delayed_scan_restart() 必须检查此开关，
+ * 否则手机断开会在 AP 发射期间强行重启 BLE scan，与 AP 抢空口导致
+ * Beacon 发不出去（lcdfix17 记录的问题）。 */
+static volatile bool s_scan_allowed = true;
+
 /* ---- 前向声明（NimBLE 回调必须返回 int） ---- */
 static int ble_scan_gap_event(struct ble_gap_event *event, void *arg);
 static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t data_len,
@@ -322,6 +330,14 @@ esp_err_t crid_ble_scan_init(void) {
 }
 
 esp_err_t crid_ble_scan_start(void) {
+    /* lcdfix28: 模拟发射期间禁止扫描（由 app_main detect_stop 设置）。
+     * 这也会挡住 BLE 连接/断开事件里的 delayed_scan_restart。 */
+    if (!s_scan_allowed) {
+        ESP_LOGI(TAG, "Scan start suppressed (scan not allowed in current mode)");
+        s_scan_running = false;
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (s_scan_running) {
         ESP_LOGW(TAG, "Scan already running");
         return ESP_OK;
@@ -356,4 +372,13 @@ void crid_ble_scan_stop(void) {
 
 bool crid_ble_scan_is_running(void) {
     return s_scan_running;
+}
+
+/* lcdfix28: 设置扫描允许开关。false 时正在运行的扫描会被停掉，
+ * 且后续 crid_ble_scan_start()（含 BLE 事件触发的延迟重启）被拒绝。 */
+void crid_ble_scan_set_allowed(bool allowed) {
+    s_scan_allowed = allowed;
+    if (!allowed && s_scan_running) {
+        crid_ble_scan_stop();
+    }
 }

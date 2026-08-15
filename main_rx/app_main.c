@@ -118,6 +118,8 @@ static sim_config_t s_sim_config;
 static esp_err_t detect_stop(void) {
     if (!s_detect_active) return ESP_OK;
     ESP_LOGI("MODE", "Detect STOP: halting BLE scan + WiFi sniffer");
+    /* 先关扫描允许开关，挡住 BLE 连接/断开事件里的延迟重启 */
+    crid_ble_scan_set_allowed(false);
     crid_sniffer_stop_channel_hold();
     vTaskDelay(pdMS_TO_TICKS(100));
     crid_ble_scan_stop();
@@ -131,6 +133,8 @@ static esp_err_t detect_stop(void) {
 static esp_err_t detect_start(void) {
     if (s_detect_active) return ESP_OK;
     ESP_LOGI("MODE", "Detect START: WiFi sniffer + BLE scan");
+    /* 先开扫描允许，再 init sniffer + start scan */
+    crid_ble_scan_set_allowed(true);
     esp_err_t ret = crid_sniffer_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sniffer re-init failed: %s", esp_err_to_name(ret));

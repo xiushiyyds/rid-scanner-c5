@@ -41,6 +41,13 @@ void crid_ble_scan_stop(void);
  */
 bool crid_ble_scan_is_running(void);
 
+/**
+ * lcdfix28: 设置扫描允许开关。
+ * 进入模拟发射页时传 false（停扫并阻止 BLE 事件重启扫描），
+ * 回到侦测页时传 true 恢复。
+ */
+void crid_ble_scan_set_allowed(bool allowed);
+
 #ifdef __cplusplus
 }
 #endif
