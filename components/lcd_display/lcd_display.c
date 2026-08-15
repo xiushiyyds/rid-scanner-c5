@@ -42,15 +42,6 @@
 static const char *TAG = "lcd_display";
 
 /* ================================================================
- * 模拟器状态
- * ================================================================ */
-static sim_display_info_t s_sim_info = {0};
-
-void lcd_display_set_sim_info(const sim_display_info_t *info) {
-    if (info) memcpy(&s_sim_info, info, sizeof(s_sim_info));
-}
-
-/* ================================================================
  * 内部状态
  * ================================================================ */
 static esp_lcd_panel_handle_t s_panel = NULL;
@@ -77,28 +68,12 @@ static volatile bool s_display_off = false;  /* 熄屏/睡眠状态 */
 static volatile uint32_t s_last_activity_ms = 0;  /* 最后一次按键时间(ms) */
 static bool s_both_pressed = false;  /* 双键同按检测 */
 
-/* 模拟器操作回调（由 app_main 注册） */
-static sim_action_cb_t s_sim_start_cb = NULL;
-static sim_action_cb_t s_sim_stop_cb = NULL;
-static sim_mode_cb_t s_sim_mode_cb = NULL;
-
-/* lcdfix28: 页面切换回调，进入新页面后通知 app_main 做射频互斥 */
-static lcd_page_change_cb_t s_page_change_cb = NULL;
-
-void lcd_display_register_page_change_cb(lcd_page_change_cb_t cb) {
-    s_page_change_cb = cb;
-}
-
-/* lcdfix28: 统一页面切换入口。所有改页面的地方都走这里，
- * 确保只在页面真正变化时触发一次 page_change 回调。 */
+/* 统一页面切换入口 */
 static void set_page_internal(lcd_page_t p) {
     if (p >= LCD_PAGE_COUNT) return;
     if (p == s_page) return;
     s_page = p;
     s_scroll_offset = 0;
-    if (s_page_change_cb) {
-        s_page_change_cb(p);
-    }
 }
 
 /* lcdfix16: GPS 状态回调（由 app_main 注入，避免 lcd_display 组件
@@ -115,14 +90,6 @@ static lcd_channel_provider_cb_t s_channel_provider_cb = NULL;
 
 void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb) {
     s_channel_provider_cb = cb;
-}
-
-void lcd_display_register_sim_callbacks(sim_action_cb_t start,
-                                         sim_action_cb_t stop,
-                                         sim_mode_cb_t cycle_mode) {
-    s_sim_start_cb = start;
-    s_sim_stop_cb = stop;
-    s_sim_mode_cb = cycle_mode;
 }
 
 /* lcdfix17: 取消自动熄屏。用户明确要求只要开关机，
@@ -653,14 +620,12 @@ static void render_footer(lcd_page_t page)
 {
     fb_fillrect(0, CONTENT_Y1, LCD_WIDTH, FOOTER_H, rgb565(20, 30, 20));
     const char *hints[] = {
-        "短按列表 长按模拟",
+        "短按列表 长按返回",
         "User选择 Boot详情",
         "User切换 Boot返回",
-        "User选项 Boot启停",
-        "User翻页 长按返回",
     };
     int idx = (int)page;
-    if (idx < 0 || idx >= 5) idx = 0;
+    if (idx < 0 || idx >= 3) idx = 0;
     fb_text(3, FT_TEXT_Y, hints[idx], C_LTGRAY);
 }
 
@@ -718,14 +683,6 @@ static void render_home(void)
     fb_hline(8, y, LCD_WIDTH - 16, C_DIM);
     y += 10;
 
-    if (s_sim_info.is_sim_running) {
-        fb_text(8, y, "● 模拟发射中", C_GREEN);
-        char cnt[16];
-        snprintf(cnt, sizeof(cnt), "%lu帧", (unsigned long)s_sim_info.sim_tx_count);
-        fb_text_right(LCD_WIDTH - 8, y, cnt, C_GREEN);
-    } else {
-        fb_text(8, y, "○ 模拟器就绪", C_GRAY);
-    }
 }
 
 /* ================================================================
@@ -978,106 +935,6 @@ static void render_detail(void)
 }
 
 /* ================================================================
- * 模拟配置页
- * ================================================================ */
-static void render_simconfig(void)
-{
-    int y = CONTENT_Y0 + 4;
-    char buf[48];
-
-    fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(60, 0, 30));
-    fb_text_center(y, "模拟设置", C_WHITE);
-    y += FONT_LINE_H + 8;
-
-    fb_text(4, y, "状态", C_GREEN);
-    const char *state_txt;
-    uint16_t state_col;
-    if (s_sim_info.is_sim_running) {
-        state_txt = "运行中"; state_col = C_GREEN;
-    } else if (s_sim_info.is_sim_armed) {
-        state_txt = "已启用"; state_col = C_ORANGE;
-    } else {
-        state_txt = "已停止"; state_col = C_GRAY;
-    }
-    fb_text_right(LCD_WIDTH - 4, y, state_txt, state_col);
-    y += FONT_LINE_H + 6;
-
-    fb_text(4, y, "飞行模式", C_GREEN);
-    const char *modes[] = {"圆周", "往返", "搜索"};
-    int mi = s_sim_info.sim_flight_mode;
-    if (mi < 0 || mi >= 3) mi = 0;
-    fb_text_right(LCD_WIDTH - 4, y, modes[mi], C_YELLOW);
-    y += FONT_LINE_H + 6;
-
-    snprintf(buf, sizeof(buf), "信道%d", s_sim_info.sim_channel);
-    fb_text(4, y, buf, C_CYAN);
-    y += FONT_LINE_H + 4;
-
-    fb_text(4, y, "ID", C_GREEN);
-    fb_text(30, y,
-        s_sim_info.sim_uas_id[0] ? s_sim_info.sim_uas_id : "SIM-C5",
-        C_WHITE);
-    y += FONT_LINE_H + 8;
-
-    fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 8;
-
-    snprintf(buf, sizeof(buf), "纬度%.4f", s_sim_info.sim_lat);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 4;
-    snprintf(buf, sizeof(buf), "经度%.4f", s_sim_info.sim_lon);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 4;
-    snprintf(buf, sizeof(buf), "目标数%d", s_sim_info.sim_target_count);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 12;
-
-    fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 6;
-    fb_text(4, y, "User切换模式", C_LTGRAY);
-    y += FONT_LINE_H + 2;
-    if (s_sim_info.is_sim_running)
-        fb_text(4, y, "Boot键停止", C_ORANGE);
-    else if (s_sim_info.is_sim_armed)
-        fb_text(4, y, "Boot键发射", C_GREEN);
-    else
-        fb_text(4, y, "请先在手机启用", C_YELLOW);
-}
-
-/* ================================================================
- * 模拟状态页
- * ================================================================ */
-static void render_simstatus(void)
-{
-    int y = CONTENT_Y0 + 4;
-    char buf[48];
-
-    fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(0, 50, 25));
-    fb_text_center(y, "模拟状态", C_WHITE);
-    y += FONT_LINE_H + 8;
-
-    if (s_sim_info.is_sim_running) {
-        fb_text(4, y, "● 发射中", C_GREEN);
-    } else {
-        fb_text(4, y, "○ 已停止", C_GRAY);
-    }
-    y += FONT_LINE_H + 6;
-
-    snprintf(buf, sizeof(buf), "纬度  %.6f", s_sim_info.sim_lat);
-    fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "经度  %.6f", s_sim_info.sim_lon);
-    fb_text(4, y, buf, C_CYAN); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "航向  %.1f度", s_sim_info.sim_heading);
-    fb_text(4, y, buf, C_YELLOW); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "高度  %.1fm", s_sim_info.sim_alt);
-    fb_text(4, y, buf, C_GREEN); y += FONT_LINE_H + 2;
-    snprintf(buf, sizeof(buf), "信道  %d", s_sim_info.sim_channel);
-    fb_text(4, y, buf, C_WHITE); y += FONT_LINE_H + 6;
-
-    fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
-    y += 6;
-    snprintf(buf, sizeof(buf), "已发射  %lu帧", (unsigned long)s_sim_info.sim_tx_count);
-    fb_text(4, y, buf, C_ORANGE);
-}
-
-/* ================================================================
  * BLE 配对码覆盖层
  * ================================================================ */
 static char s_pin[8] = {0};
@@ -1155,8 +1012,6 @@ static void refresh_task(void *arg)
             case LCD_PAGE_HOME:       render_home(); break;
             case LCD_PAGE_LIST:       render_list(); break;
             case LCD_PAGE_DETAIL:     render_detail(); break;
-            case LCD_PAGE_SIM_CONFIG: render_simconfig(); break;
-            case LCD_PAGE_SIM_STATUS: render_simstatus(); break;
             default: break;
         }
 
@@ -1212,59 +1067,12 @@ static void refresh_task(void *arg)
                 } else if (key == LCD_KEY_BACK) {
                     set_page_internal(LCD_PAGE_HOME);
                 }
-            } else if (s_page == LCD_PAGE_SIM_CONFIG) {
-                /* lcdfix28: 模拟配置页
-                 *   User短按/长按 = 切换飞行模式
-                 *   Boot短按 = 启动发射，启动后自动跳到状态页
-                 *   Boot长按 = 返回主页（page_change 回调会停掉未发射的模拟器并恢复侦测） */
-                if (key == LCD_KEY_NEXT) {
-                    int new_mode = (s_sim_info.sim_flight_mode + 1) % 3;
-                    s_sim_info.sim_flight_mode = (uint8_t)new_mode;
-                    if (s_sim_mode_cb) s_sim_mode_cb(new_mode);
-                } else if (key == LCD_KEY_PREV) {
-                    int new_mode = (s_sim_info.sim_flight_mode + 2) % 3;
-                    s_sim_info.sim_flight_mode = (uint8_t)new_mode;
-                    if (s_sim_mode_cb) s_sim_mode_cb(new_mode);
-                } else if (key == LCD_KEY_SELECT) {
-                    if (s_sim_info.is_sim_running) {
-                        /* 正在发射：短按停止，回到主页恢复侦测 */
-                        if (s_sim_stop_cb) s_sim_stop_cb();
-                        set_page_internal(LCD_PAGE_HOME);
-                    } else {
-                        /* 启动发射，切到状态页看 TX 计数 */
-                        if (s_sim_start_cb) s_sim_start_cb();
-                        set_page_internal(LCD_PAGE_SIM_STATUS);
-                    }
-                } else if (key == LCD_KEY_BACK) {
-                    set_page_internal(LCD_PAGE_HOME);
-                }
-            } else if (s_page == LCD_PAGE_SIM_STATUS) {
-                /* 模拟状态页：Boot短按=停止并回主页，Boot长按=主页 */
-                if (key == LCD_KEY_SELECT) {
-                    if (s_sim_info.is_sim_running && s_sim_stop_cb)
-                        s_sim_stop_cb();
-                    set_page_internal(LCD_PAGE_HOME);
-                } else if (key == LCD_KEY_BACK) {
-                    set_page_internal(LCD_PAGE_HOME);
-                }
             } else {
-                /* 主页按键逻辑（lcdfix28）：
-                 *   User短按 = 列表（有目标进列表，无目标停在主页提示扫描中）
-                 *   User长按 = 模拟配置（进入模拟器配置，自动暂停侦测）
-                 *   Boot短按 = 列表
-                 *   Boot长按 = 模拟配置 */
-                if (key == LCD_KEY_NEXT) {
+                /* 主页按键：短按进列表，长按返回（无操作） */
+                if (key == LCD_KEY_NEXT || key == LCD_KEY_SELECT) {
                     if (active > 0) {
                         set_page_internal(LCD_PAGE_LIST);
                     }
-                } else if (key == LCD_KEY_PREV) {
-                    set_page_internal(LCD_PAGE_SIM_CONFIG);
-                } else if (key == LCD_KEY_SELECT) {
-                    if (active > 0) {
-                        set_page_internal(LCD_PAGE_LIST);
-                    }
-                } else if (key == LCD_KEY_BACK) {
-                    set_page_internal(LCD_PAGE_SIM_CONFIG);
                 }
             }
         }

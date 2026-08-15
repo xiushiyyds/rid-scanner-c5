@@ -8,9 +8,10 @@ idf_component_register(SRCS app_main.c
                             crid_display.c
                             crid_json.c
                             crid_ble.c
+                            crid_ble_scan.c
                             geofence.c
                             gps_module.c
                             dji_droneid.c
                        INCLUDE_DIRS ""
-                       PRIV_REQUIRES opendroneid bt lcd_display crid_simulator
+                       PRIV_REQUIRES opendroneid bt lcd_display crid_common
                        REQUIRES nvs_flash esp_wifi esp_netif esp_event log esp_driver_uart esp_hw_support esp_system esp_timer spi_flash esp_driver_gpio)
