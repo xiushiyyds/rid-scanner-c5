@@ -25,6 +25,7 @@
 #include "driver/uart.h"
 #include "opendroneid.h"
 #include "esp_wifi.h"
+#include "esp_bt.h"
 
 #include "crid_rx_types.h"
 #include "gps_module.h"
@@ -43,7 +44,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix25"
+#define CRID_VERSION_STRING "1.9.9-lcdfix26"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -901,15 +902,61 @@ void app_main(void) {
     esp_netif_init();
     esp_event_loop_create_default();
 
-    // 4. 初始化 LCD 显示模块（必须在 WiFi/BLE 之前！）
-    //    108KB 全屏 DMA 帧缓冲必须从连续内部 SRAM 分配，
-    //    WiFi/BT 协议栈会占用并碎片化内部 SRAM，之后就分配不到了。
-    //    lcdfix10：如果 LCD 初始化失败，后续仍可正常工作（串口输出）。
+    // 4. lcdfix26: BLE 必须在 LCD 之前初始化。
+    //    lcdfix25 把 BLE 移到 WiFi 之前，controller init 通过了，
+    //    但 ext_adv_configure 后 controller 在 r_ble_ll_mem_msys_update
+    //    分配链路层缓冲区时 assert 崩溃——因为 LCD 初始化后内部 SRAM 被
+    //    切碎（总剩余 89KB，最大连续块仅 40KB）。
+    //    BLE controller 需要大块连续内部 SRAM 用于 ext_adv 链路层缓冲，
+    //    必须在 LCD 的 13.6KB DMA bounce buffer 分配之前、内存还是整块时拿到。
+    //    启动时屏幕会黑几秒（等 BLE controller + PHY init ~3.5s），可接受。
+
+    // 4a. 注册所有 BLE 回调（纯函数指针赋值，不依赖 BLE 或 LCD 已初始化）
+    crid_ble_register_pair_display(lcd_display_show_pair_pin);
+    crid_ble_register_sim_callbacks(sim_ble_start_handler,
+                                    sim_ble_stop_handler,
+                                    sim_ble_config_handler,
+                                    sim_ble_status_handler);
+
+    // 4b. 释放不用的经典蓝牙控制器内存（~70KB BSS/data），给 BLE 更多空间
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+
+    ESP_LOGI("RID_MAIN", "Before BLE init - free heap: %u, internal free: %u, largest block: %u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    // 4c. 初始化 BLE（NimBLE controller + host）
+    ret = crid_ble_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE("RID_MAIN", "BLE init failed: %s (free heap=%u, internal=%u, largest=%u)",
+                 esp_err_to_name(ret),
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        json_warning("RID_MAIN", "BLE init failed (non-fatal)");
+    } else {
+        // BLE 就绪后切换为扇出回调：UART + BLE 双路输出
+        json_set_data_write_cb(data_write_fanout, NULL);
+        json_debug("RID_MAIN", "BLE data channel + SIM callbacks registered");
+
+        // 初始化 BLE RID 扫描模块
+        crid_ble_scan_init();
+        json_debug("RID_MAIN", "BLE RID scanner initialized (will start on host sync)");
+    }
+
+    ESP_LOGI("RID_MAIN", "After BLE init - free heap: %u, internal free: %u, largest block: %u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    // 5. 初始化 LCD 显示模块（在 BLE 之后）
+    //    BLE 已经拿到连续 SRAM，LCD 的 DMA bounce buffer 从剩余空间分配。
+    //    BLE 回调指针已提前注册，LCD 按键事件可正常扇出。
     if (lcd_display_init() == 0) {
         lcd_display_set_source(crid_tracker_get_table(),
                                crid_tracker_get_mutex(),
                                MAX_TRACKED_UAVS);
-        crid_ble_register_pair_display(lcd_display_show_pair_pin);
         /* 注册 LCD 按键模拟器操作回调 */
         lcd_display_register_sim_callbacks(
             lcd_sim_start_handler,
@@ -920,43 +967,9 @@ void app_main(void) {
         lcd_display_register_gps_provider(lcd_gps_provider);
         /* lcdfix19: 注册当前扫描信道回调（1/6/11 跳频） */
         lcd_display_register_channel_provider(crid_sniffer_get_current_channel);
-        json_debug("RID_MAIN", "LCD display ready (ST7789 170x320, full DMA)");
+        json_debug("RID_MAIN", "LCD display ready (ST7789 170x320)");
     } else {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
-    }
-
-    // 5. lcdfix25: 先初始化 BLE，再初始化 WiFi sniffer。
-    //    BLE controller 需要大块连续内部 SRAM，WiFi sniffer 的 esp_wifi_init/start
-    //    会占用大量内部 DMA 内存，若先初始化 WiFi，BLE controller 会因
-    //    ESP_ERR_NO_MEM (257) 初始化失败。官方 coex 示例均为先 BLE 后 WiFi。
-    ESP_LOGI("RID_MAIN", "Before BLE init - free heap: %u, internal free: %u, largest block: %u",
-             (unsigned)esp_get_free_heap_size(),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-
-    ret = crid_ble_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE("RID_MAIN", "BLE init failed: %s (free heap=%u, internal=%u, largest=%u)",
-                 esp_err_to_name(ret),
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-        json_warning("RID_MAIN", "BLE init failed (non-fatal)");
-    } else {
-        // 注册模拟器控制回调（多目标版）
-        crid_ble_register_sim_callbacks(sim_ble_start_handler,
-                                        sim_ble_stop_handler,
-                                        sim_ble_config_handler,
-                                        sim_ble_status_handler);
-
-        // BLE 就绪后切换为扇出回调：UART + BLE 双路输出
-        json_set_data_write_cb(data_write_fanout, NULL);
-        json_debug("RID_MAIN", "BLE data channel + SIM callbacks registered");
-
-        // v1.8: 初始化 BLE RID 扫描模块
-        // 实际扫描在 NimBLE host sync 后由 crid_ble.c 的 sync 回调触发
-        crid_ble_scan_init();
-        json_debug("RID_MAIN", "BLE RID scanner initialized (will start on host sync)");
     }
 
     // 6. 初始化 Wi-Fi sniffer（在 BLE 之后）
