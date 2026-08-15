@@ -184,6 +184,9 @@ static bool g_ble_initialized = false;
 static esp_timer_handle_t g_adv_timer = NULL;
 #define ADV_TIMEOUT_US (60 * 1000 * 1000)  /* 60秒 */
 
+/* lcdfix21: NUS 外设使用的 Extended Adv 实例号（必须在 adv_timeout_cb 前定义） */
+#define NUS_ADV_INSTANCE   0
+
 /* ================================================================
  * 数据发送队列 (指针传递，缓冲区从 SPIRAM 分配)
  * ================================================================ */
@@ -386,8 +389,6 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
  *   手机自然搜不到。必须改用 Extended Advertising 实例 API，并把 legacy_pdu=1
  *   强制走 Legacy PDU（31 字节），保证手机/浏览器兼容性。
  * ================================================================ */
-
-#define NUS_ADV_INSTANCE   0
 
 static int g_adv_configured = 0;
 
