@@ -469,6 +469,30 @@ ble_advertise_start(void)
             ESP_LOGE(TAG, "ext_adv_configure failed (rc=%d)", rc);
             return;
         }
+        ESP_LOGI(TAG, "ext_adv_configure OK, selected_tx_power=%d dBm, own_addr_type=%d",
+                 selected_tx_power, g_own_addr_type);
+
+        /* lcdfix24: EXT_ADV 模式下使用 RANDOM 地址时，必须显式为 instance
+         * 设置随机地址，否则 controller 可能不会真正发射广播。
+         * 参照 ESP-IDF ble_multi_adv 示例 ble_multi_adv_set_addr()。
+         * PUBLIC 地址类型不需要此步骤（controller 直接使用公共地址）。 */
+        if (g_own_addr_type == BLE_OWN_ADDR_RANDOM ||
+            g_own_addr_type == BLE_OWN_ADDR_RPA_RANDOM_DEFAULT) {
+            ble_addr_t rnd_addr;
+            /* 从已配置的 identity 地址复制随机地址 */
+            rc = ble_hs_id_copy_addr(BLE_ADDR_RANDOM, rnd_addr.val, NULL);
+            if (rc == 0) {
+                rnd_addr.type = BLE_ADDR_RANDOM;
+                rc = ble_gap_ext_adv_set_addr(NUS_ADV_INSTANCE, &rnd_addr);
+                if (rc != 0) {
+                    ESP_LOGW(TAG, "ble_gap_ext_adv_set_addr failed (rc=%d), continuing anyway", rc);
+                } else {
+                    ESP_LOGI(TAG, "ext_adv instance %d random address set", NUS_ADV_INSTANCE);
+                }
+            } else {
+                ESP_LOGW(TAG, "ble_hs_id_copy_addr(RANDOM) failed (rc=%d)", rc);
+            }
+        }
 
         /* 设置广播数据 */
         uint8_t adv_buf[BLE_HS_ADV_MAX_SZ];
@@ -519,7 +543,12 @@ ble_advertise_start(void)
         return;
     }
 
-    ESP_LOGI(TAG, "Advertising as 'RID-Scanner' with NUS UUID");
+    /* lcdfix24: 验证广播是否真正在 controller 层 active */
+    if (ble_gap_ext_adv_active(NUS_ADV_INSTANCE)) {
+        ESP_LOGI(TAG, "Advertising ACTIVE as 'RID-Scanner' (NUS UUID in scan rsp)");
+    } else {
+        ESP_LOGE(TAG, "ext_adv_start returned 0 but instance NOT active!");
+    }
 
     /* 启动 60 秒超时定时器：无人连接则自动关闭广播 */
     if (g_adv_timer) {
