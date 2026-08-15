@@ -229,8 +229,13 @@ void crid_parser_extract_layered(uav_track_t *uav) {
     #define MAP_ODID_FIELD(dst, src, valid_cond) \
         do { if (valid_cond) { (dst) = (uint8_t)(src); } } while(0)
 
-    /* Basic ID */
-    uav->basic_id.valid = false;
+    /* Basic ID — v2.0.6 fix: 不要在每条消息里无条件清零。
+     * RID 广播每 1-3 秒在 BasicID/Location/SelfID/System 间轮转，
+     * 如果本包不含 BasicID 就把之前已解析的 SN 清掉，会导致：
+     *  1. LCD 上 SN 频繁变成 "----"
+     *  2. 跨 MAC 合并失效（find_by_uas_id 只匹配 valid 的 track）
+     *  3. 手机端 basic_id 反复为 null
+     * 正确做法：本包带 BasicID 才覆盖，不带则保留历史值。 */
     if (uav->uas_data.BasicIDValid[0]) {
         const ODID_BasicID_data *b = &uav->uas_data.BasicID[0];
         uav->basic_id.valid   = true;
@@ -239,9 +244,8 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         strncpy(uav->basic_id.uas_id, b->UASID, sizeof(uav->basic_id.uas_id) - 1);
         uav->basic_id.uas_id[sizeof(uav->basic_id.uas_id) - 1] = '\0';
     }
-    /* Location */
-    uav->location.valid = uav->uas_data.LocationValid;
-    if (uav->location.valid) {
+    /* Location — 同上：本包带 Location 才更新，不带则保留最后一次有效坐标 */
+    if (uav->uas_data.LocationValid) {
         const ODID_Location_data *l = &uav->uas_data.Location;
         uav->location.latitude        = l->Latitude;
         uav->location.longitude       = l->Longitude;
@@ -261,9 +265,9 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         uav->location.timestamp = l->TimeStamp;
     }
 
-    /* System Info */
-    uav->system.valid = uav->uas_data.SystemValid;
-    if (uav->system.valid) {
+    /* System Info — 本包带 System 才更新，否则保留历史值 */
+    if (uav->uas_data.SystemValid) {
+        uav->system.valid = true;
         const ODID_System_data *s = &uav->uas_data.System;
         uav->system.operator_location_type = (uint8_t)s->OperatorLocationType;
         uav->system.operator_latitude      = s->OperatorLatitude;
@@ -279,18 +283,18 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         uav->system.timestamp              = s->Timestamp;
     }
 
-    /* Self ID */
-    uav->self_id.valid = uav->uas_data.SelfIDValid;
-    if (uav->self_id.valid) {
+    /* Self ID — 本包带 SelfID 才更新，否则保留历史值 */
+    if (uav->uas_data.SelfIDValid) {
+        uav->self_id.valid = true;
         const ODID_SelfID_data *s = &uav->uas_data.SelfID;
         uav->self_id.description_type = (uint8_t)s->DescType;
         strncpy(uav->self_id.description, s->Desc, sizeof(uav->self_id.description) - 1);
         uav->self_id.description[sizeof(uav->self_id.description) - 1] = '\0';
     }
 
-    /* Operator ID */
-    uav->operator_id.valid = uav->uas_data.OperatorIDValid;
-    if (uav->operator_id.valid) {
+    /* Operator ID — 本包带 OperatorID 才更新，否则保留历史值 */
+    if (uav->uas_data.OperatorIDValid) {
+        uav->operator_id.valid = true;
         const ODID_OperatorID_data *o = &uav->uas_data.OperatorID;
         uav->operator_id.id_type = (uint8_t)o->OperatorIdType;
         strncpy(uav->operator_id.id, o->OperatorId, sizeof(uav->operator_id.id) - 1);

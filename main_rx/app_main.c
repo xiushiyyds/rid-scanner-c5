@@ -46,7 +46,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.0.5-detector"
+#define CRID_VERSION_STRING "2.0.6-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -108,6 +108,17 @@ static void parser_task(void *pvParameter) {
     uint32_t last_idle_output_ms = 0;
 
     while (1) {
+        /* v2.0.6: 即使没收到包也定期清理超时 track，避免占满表 */
+        {
+            uint32_t now = esp_log_timestamp();
+            if (now - last_cleanup_ms >= 5000) {
+                if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    crid_tracker_cleanup(UAV_TIMEOUT_MS);
+                    xSemaphoreGive(mutex);
+                }
+                last_cleanup_ms = now;
+            }
+        }
         if (xQueueReceive(queue, &msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
             uint32_t now = esp_log_timestamp();
             if (crid_tracker_get_active_count() == 0 &&
@@ -240,6 +251,10 @@ static void parser_task(void *pvParameter) {
                             sizeof(existing->dji_identification) - 1);
                     uav->active = false;
                     uav->msg_count = 0;
+                    ESP_LOGI("RID_DEDUP", "DJI merged MAC %02X:%02X:%02X:%02X:%02X:%02X -> SN %s",
+                             msg.src_mac[0], msg.src_mac[1], msg.src_mac[2],
+                             msg.src_mac[3], msg.src_mac[4], msg.src_mac[5],
+                             uav->basic_id.uas_id);
                     uav = existing;
                     was_new = false;
                 }
@@ -338,6 +353,10 @@ static void parser_task(void *pvParameter) {
                 }
                 uav->active = false;
                 uav->msg_count = 0;
+                ESP_LOGI("RID_DEDUP", "ASTM merged MAC %02X:%02X:%02X:%02X:%02X:%02X -> SN %s",
+                         msg.src_mac[0], msg.src_mac[1], msg.src_mac[2],
+                         msg.src_mac[3], msg.src_mac[4], msg.src_mac[5],
+                         uav->basic_id.uas_id);
                 uav = existing;
                 was_new = false;
             }
