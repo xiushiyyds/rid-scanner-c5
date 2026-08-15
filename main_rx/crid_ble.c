@@ -751,7 +751,7 @@ crid_ble_init(void)
      * 尚未就绪，是空操作。地址设置详见 on_sync 注释。 */
 
     /* 注册 GATT 服务 */
-    rc = ble_gatts_count_cfg(gatt_svr_svcs);
+    int rc = ble_gatts_count_cfg(gatt_svr_svcs);
     if (rc != 0) {
         ESP_LOGE(TAG, "GATT count failed (rc=%d)", rc);
         nimble_port_deinit();
