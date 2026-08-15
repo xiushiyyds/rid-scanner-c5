@@ -36,6 +36,14 @@ static uint8_t s_ext_adv_type = 0;  /* 0=Legacy, 1=Extended */
 /* 扫描允许开关（侦测板始终 true，保留供未来使用） */
 static volatile bool s_scan_allowed = true;
 
+/* ---- 扫描占空比模式 ---- */
+typedef enum {
+    SCAN_DUTY_HIGH,    /* 未连接：连续扫描，最大化 RID 捕获率 */
+    SCAN_DUTY_LOW,     /* 已连接：低占空比，给 GATT 通信留射频 */
+} scan_duty_t;
+
+static scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;
+
 /* ---- 前向声明 ---- */
 static int ble_scan_gap_event(struct ble_gap_event *event, void *arg);
 static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t data_len,
@@ -207,10 +215,19 @@ static int start_scan(void) {
     ESP_LOGI(TAG, "BLE_EXT_ADV not enabled, using legacy scan");
 #endif
 
-    /* Legacy 扫描：10% 占空比，给 WiFi sniffer 留空口 */
+    /* Legacy 扫描参数根据连接状态动态调整：
+     * - 未连接(HIGH)：window=itvl=160 → 100ms 连续扫描，最大化 RID 捕获
+     * - 已连接(LOW) ：window=32/itvl=160 → 20ms/100ms = 20% 占空比，给 GATT 留射频 */
     memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
-    disc_params.window = 80;          /* 80 × 0.625ms = 50ms (50% duty) */
+    if (s_scan_duty == SCAN_DUTY_HIGH) {
+        disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
+        disc_params.window = 160;         /* 160 × 0.625ms = 100ms (100% 连续) */
+        ESP_LOGI(TAG, "BLE Legacy scan started (100%% continuous duty, passive)");
+    } else {
+        disc_params.itvl = 160;           /* 100ms interval */
+        disc_params.window = 32;          /* 20ms listen = 20% duty */
+        ESP_LOGI(TAG, "BLE Legacy scan started (20%% duty, GATT coexist)");
+    }
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
     disc_params.passive = 1;
@@ -224,7 +241,6 @@ static int start_scan(void) {
     }
 
     s_ext_adv_type = 0;
-    ESP_LOGI(TAG, "BLE Legacy scan started (50%% duty, passive)");
     return 0;
 }
 
@@ -284,5 +300,25 @@ void crid_ble_scan_set_allowed(bool allowed) {
     s_scan_allowed = allowed;
     if (!allowed && s_scan_running) {
         crid_ble_scan_stop();
+    }
+}
+
+void crid_ble_scan_set_duty_high(void) {
+    if (s_scan_duty == SCAN_DUTY_HIGH) return;
+    s_scan_duty = SCAN_DUTY_HIGH;
+    if (s_scan_running) {
+        crid_ble_scan_stop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        crid_ble_scan_start();
+    }
+}
+
+void crid_ble_scan_set_duty_low(void) {
+    if (s_scan_duty == SCAN_DUTY_LOW) return;
+    s_scan_duty = SCAN_DUTY_LOW;
+    if (s_scan_running) {
+        crid_ble_scan_stop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        crid_ble_scan_start();
     }
 }

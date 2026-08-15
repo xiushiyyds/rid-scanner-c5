@@ -1038,10 +1038,17 @@ async function toggleConnect(){
     // ★ 连接板子后：清空残留目标，准备接收真实侦测数据
     clearAllDrones();
     if(map && centerMarker) { centerMarker.hide(); } // 隐藏默认位置，等板子GPS
-    addLog('info','[系统] 已切换为真机侦测模式，等待板子GPS定位...');
-    // 连接后进入配对流程
+    addLog('info','[系统] 已连接侦测板，等待设备就绪...');
+    // v2.0.2：侦测板自动配对（SUBSCRIBE 事件触发 PAIR_OK），无需手动输入 PIN。
+    // 等 5 秒超时保护：如果没收到 PAIR_OK，也强制进入已连接状态。
     _connecting=false;
-    showPairDialog();
+    if(_pairTimer) clearTimeout(_pairTimer);
+    _pairTimer=setTimeout(()=>{
+      if(!isPaired && isConnected){
+        addLog('warn','[配对] 未收到 PAIR_OK，强制进入已连接状态');
+        onPairResult(true);
+      }
+    }, 5000);
   }catch(e){
     _connecting=false;
     addLog('error','[BLE] 连接失败: '+e.message);

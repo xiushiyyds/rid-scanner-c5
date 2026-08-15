@@ -27,6 +27,14 @@ bool crid_ble_scan_is_running(void);
  */
 void crid_ble_scan_set_allowed(bool allowed);
 
+/**
+ * 切换扫描占空比模式。
+ * HIGH：未连接时连续扫描（~100% duty），最大化 RID 捕获。
+ * LOW：已连接时低占空比（~20% duty），给 GATT 通信留射频。
+ */
+void crid_ble_scan_set_duty_high(void);
+void crid_ble_scan_set_duty_low(void);
+
 #ifdef __cplusplus
 }
 #endif
