@@ -386,6 +386,18 @@ QueueHandle_t crid_sniffer_get_queue(void) {
     return g_sniffer_queue;
 }
 
+esp_err_t crid_sniffer_queue_create(void) {
+    if (g_sniffer_queue != NULL) {
+        return ESP_OK;  /* 已存在，幂等 */
+    }
+    g_sniffer_queue = xQueueCreate(SNIFFER_QUEUE_SIZE, sizeof(sniffer_msg_t));
+    if (g_sniffer_queue == NULL) {
+        json_error("RID_SNIFF", "Failed to create sniffer queue!");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
 sniffer_stats_t *crid_sniffer_get_stats(void) {
     return &g_stats;
 }
@@ -397,17 +409,18 @@ esp_err_t crid_sniffer_init(void) {
 
     ESP_LOGI(TAG, "Initializing Wi-Fi Sniffer...");
 
-    /* 复用已有队列（模式切换时 parser_task 仍持有旧句柄） */
+    /* lcdfix31: 队列已由 crid_sniffer_queue_create() 提前创建。
+     * 这里只确保存在（兼容直接调用 crid_sniffer_init 的路径）。 */
     if (g_sniffer_queue == NULL) {
         g_sniffer_queue = xQueueCreate(SNIFFER_QUEUE_SIZE, sizeof(sniffer_msg_t));
+        if (g_sniffer_queue == NULL) {
+            json_error("RID_SNIFF", "Failed to create sniffer queue!");
+            return ESP_ERR_NO_MEM;
+        }
     } else {
         /* 清空旧队列中可能残留的数据 */
         sniffer_msg_t discard;
         while (xQueueReceive(g_sniffer_queue, &discard, 0) == pdTRUE) {}
-    }
-    if (g_sniffer_queue == NULL) {
-        json_error("RID_SNIFF", "Failed to create sniffer queue!");
-        return ESP_ERR_NO_MEM;
     }
 
     /* lcdfix16: 用静态标志跟踪 WiFi 初始化状态，

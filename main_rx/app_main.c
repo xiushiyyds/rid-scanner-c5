@@ -44,7 +44,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix30"
+#define CRID_VERSION_STRING "1.9.9-lcdfix31"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -1092,18 +1092,18 @@ void app_main(void) {
         json_warning("RID_MAIN", "LCD init failed (non-fatal, serial only)");
     }
 
-    // 6. 初始化 Wi-Fi sniffer（在 BLE 之后）
-    ret = crid_sniffer_init();
-    if (ret != ESP_OK) {
-        json_error("RID_MAIN", "Sniffer init failed!");
+    // 6. lcdfix31: 先创建 FreeRTOS 任务，再初始化 WiFi sniffer。
+    //    lcdfix30 真机日志显示 WiFi init 后内部 SRAM 被大量占用，
+    //    xTaskCreate(parser, 8192) 失败返回 pdFAIL，app_main 直接 return，
+    //    后续 TDD 调度、monitor、SIM 任务全部没启动。
+    //    任务栈在 WiFi 启动前分配，可避开 WiFi 内部缓冲区的内存碎片。
+    BaseType_t task_created;
+
+    /* 先创建 sniffer 队列（不依赖 WiFi），parser/monitor 启动后阻塞在队列上 */
+    if (crid_sniffer_queue_create() != ESP_OK) {
+        json_error("RID_MAIN", "Failed to create sniffer queue!");
         return;
     }
-
-    // lcdfix30: 注册 TDD BLE 回调，由 channel_hold_task 分时调度
-    crid_sniffer_set_ble_tdd_callbacks(tdd_ble_pause, tdd_ble_resume);
-
-    // 7. 创建任务
-    BaseType_t task_created;
 
     task_created = xTaskCreate(parser_task, "parser",
                                PARSER_TASK_STACK, NULL, PARSER_TASK_PRIO, NULL);
@@ -1119,6 +1119,19 @@ void app_main(void) {
         return;
     }
 
+    /* 其他长期任务一并提前创建 */
+    xTaskCreatePinnedToCore(lcd_sim_update_task, "lcd_sim_upd", 2048, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 3072, NULL, 3, NULL, 0);
+
+    /* 最后初始化 WiFi（会吃掉大量内部 SRAM 做 RX/TX buffer） */
+    ret = crid_sniffer_init();
+    if (ret != ESP_OK) {
+        json_error("RID_MAIN", "Sniffer init failed!");
+        return;
+    }
+
+    // lcdfix30: 注册 TDD BLE 回调，由 channel_hold_task 分时调度
+    crid_sniffer_set_ble_tdd_callbacks(tdd_ble_pause, tdd_ble_resume);
     crid_sniffer_start_channel_hold();
 
     // 8. 启动完成（调试流 → USB CDC）
@@ -1126,12 +1139,7 @@ void app_main(void) {
                         FIXED_CHANNEL, MAX_TRACKED_UAVS,
                         (uint32_t)esp_get_free_heap_size());
 
-    // 创建 LCD 模拟器信息更新任务
-    xTaskCreatePinnedToCore(lcd_sim_update_task, "lcd_sim_upd", 2048, NULL, 2, NULL, 0);
     ESP_LOGI("RID_MAIN", "SIM LCD update task started");
-
-    // GPS 自身位置上报任务 (每3秒发送 SELF_GPS)
-    xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 3072, NULL, 3, NULL, 0);
     ESP_LOGI("RID_MAIN", "GPS report task started (3s interval)");
 
     // 初始化 LCD 模拟器信息

@@ -19,6 +19,13 @@ extern "C" {
 QueueHandle_t crid_sniffer_get_queue(void);
 
 /**
+ * lcdfix31: 仅创建 sniffer 消息队列（不初始化 WiFi）。
+ * 用于在 WiFi 初始化前先创建 parser/monitor 任务，避免 WiFi 占用
+ * 大量内部 SRAM 后任务栈分配失败。
+ */
+esp_err_t crid_sniffer_queue_create(void);
+
+/**
  * 获取全局统计指针
  */
 sniffer_stats_t *crid_sniffer_get_stats(void);
