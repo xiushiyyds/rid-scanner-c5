@@ -349,8 +349,7 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_ADV_COMPLETE:
         /* lcdfix21: 连入成功 reason=0 不要重启广播，否则会和现有连接冲突。
          * 60 秒超时（BLE_HS_ETIMEOUT）才是真正需要重启的情况。 */
-        ESP_LOGI(TAG, "ADV_COMPLETE reason=%d instance=%d",
-                 event->adv_complete.reason, event->adv_complete.instance);
+        ESP_LOGI(TAG, "ADV_COMPLETE reason=%d", event->adv_complete.reason);
         if (event->adv_complete.reason != 0) {
             ble_advertise_start();
         }
@@ -476,10 +475,9 @@ ble_advertise_start(void)
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;  /* 通用可发现 */
     adv_params.itvl_min  = BLE_GAP_ADV_ITVL_MS(100);
     adv_params.itvl_max  = BLE_GAP_ADV_ITVL_MS(150);
-    adv_params.channel_sp = 0;  /* 所有信道 */
+    adv_params.channel_map = 0;  /* 所有信道 (0 = default all 37/38/39) */
     adv_params.filter_policy = 0;
     adv_params.high_duty_cycle = 0;
-    adv_params.own_addr_type = g_own_addr_type;
 
     rc = ble_gap_adv_start(g_own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event_cb, NULL);
