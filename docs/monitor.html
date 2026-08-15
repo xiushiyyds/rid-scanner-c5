@@ -1179,7 +1179,23 @@ function parseResp(text){
       }
       if((msg.evt === 'uav_update' || msg.evt === 'uav_discovery') && msg.location){
         const loc = msg.location;
-        const id = (msg.basic_id && msg.basic_id.uas_id) ? msg.basic_id.uas_id : ('UAV_'+(msg.ts||''));
+        // 有 SN 用 SN 做 ID；无 SN 用 MAC 做临时 ID，等收到 SN 后合并
+        const hasSN = msg.basic_id && msg.basic_id.uas_id && msg.basic_id.uas_id.length > 0;
+        const sn = hasSN ? msg.basic_id.uas_id : null;
+        let id = sn || ('MAC_'+msg.mac);
+
+        // 如果之前用 MAC 临时 ID 追踪过，现在收到 SN，把旧 ID 的数据迁移过来
+        if(sn){
+          const macId = 'MAC_'+msg.mac;
+          if(droneData[macId] && !droneData[sn]){
+            droneData[sn] = droneData[macId];
+            if(droneMarkers[macId]){ droneMarkers[sn] = droneMarkers[macId]; delete droneMarkers[macId]; }
+            if(droneTrails[macId]){ droneTrails[sn] = droneTrails[macId]; delete droneTrails[macId]; }
+            if(operatorMarkers[macId]){ operatorMarkers[sn] = operatorMarkers[macId]; delete operatorMarkers[macId]; }
+            delete droneData[macId];
+            addLog('info','[合并] MAC '+msg.mac+' → SN '+sn);
+          }
+        }
         // 相对高度优先，备选气压高度，再选大地高度
         const relAlt = (loc.height !== undefined && loc.height !== null) ? loc.height : null;
         const alt = (relAlt !== null && relAlt !== 0) ? relAlt : (loc.alt_baro || loc.alt_geo || 0);

@@ -305,7 +305,11 @@ static void parser_task(void *pvParameter) {
         xSemaphoreGive(mutex);
 
         if (was_new && uav->basic_id.valid) json_uav_discovery(uav);
-        if (uav->basic_id.valid) json_uav_update(uav);
+        /* 只要有位置数据就推送给网页，不再要求 BasicID(SN) 就绪。
+         * 无人机 BasicID/Location/SelfID/System 消息轮转广播，可能先收到 Location
+         * 再收到 BasicID，旧逻辑导致前若干秒网页列表为空。
+         * 有 SN 用 SN 做 ID，无 SN 用 MAC 做 ID（后续收到 SN 时 tracker 会合并）。 */
+        if (uav->location.valid) json_uav_update(uav);
     }
 }
 

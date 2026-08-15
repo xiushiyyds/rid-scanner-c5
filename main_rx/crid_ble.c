@@ -108,13 +108,20 @@ static esp_timer_handle_t g_adv_timer = NULL;
 /* ================================================================
  * 数据发送队列
  * ================================================================ */
-#define BLE_TX_QUEUE_LEN    16
-#define BLE_TX_BUF_SIZE     512
+#define BLE_TX_QUEUE_LEN    32
+#define BLE_TX_BUF_SIZE     1024
 #define BLE_TX_TASK_STACK   3072
 #define BLE_TX_TASK_PRIO    3
 
 static QueueHandle_t g_ble_tx_queue = NULL;
 static uint32_t g_ble_queue_overflow_count = 0;
+
+/* 行缓冲：将多次 crid_ble_write_cb 片段拼成完整一行（以 \n 结尾）后再入队，
+ * 解决 JSON 被多个 DAT_PRINTF 拆分、被其他消息插队导致截断交错的问题。
+ * 同时过滤 [ZH]...[/ZH] LCD 专用消息，不发给手机。 */
+static char g_ble_linebuf[BLE_TX_BUF_SIZE];
+static size_t g_ble_linebuf_len = 0;
+static portMUX_TYPE g_ble_line_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* ================================================================
  * 前置声明
@@ -524,7 +531,7 @@ ble_tx_task(void *param)
                 }
                 offset += send_len;
                 if (offset < data_len) {
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    vTaskDelay(pdMS_TO_TICKS(5));
                 }
             }
         }
@@ -608,34 +615,56 @@ crid_ble_init(void)
     return ESP_OK;
 }
 
+/* 将一行完整数据入队发送。以 [ZH] 开头的 LCD 专用消息直接丢弃。 */
+static void ble_enqueue_line(const char *line, size_t len) {
+    if (len == 0) return;
+    /* 过滤 LCD 中文摘要：[ZH]...[/ZH] */
+    if (len >= 4 && line[0] == '[' && line[1] == 'Z' && line[2] == 'H' && line[3] == ']') {
+        return;
+    }
+    if (len > BLE_TX_BUF_SIZE - 1) len = BLE_TX_BUF_SIZE - 1;
+
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return;
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+
+    if (xQueueSend(g_ble_tx_queue, &buf, pdMS_TO_TICKS(20)) != pdTRUE) {
+        free(buf);
+        g_ble_queue_overflow_count++;
+    }
+}
+
 void
 crid_ble_write_cb(const char *data, size_t len, void *ctx)
 {
     (void)ctx;
 
-    if (!g_ble_initialized || !g_ble_tx_queue) {
-        return;
-    }
+    if (!g_ble_initialized || !g_ble_tx_queue) return;
     if (!data || len == 0) return;
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
 
-    if (len > BLE_TX_BUF_SIZE - 1) {
-        len = BLE_TX_BUF_SIZE - 1;
+    /* 行缓冲：多个 DAT_PRINTF 片段拼成完整一行（\n 结尾）后整体入队，
+     * 保证 JSON 原子性，不会被 SELF_GPS 等消息插队截断。 */
+    portENTER_CRITICAL(&g_ble_line_mux);
+    for (size_t i = 0; i < len; i++) {
+        char c = data[i];
+        if (c == '\n') {
+            /* 一行结束，入队 */
+            ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
+            g_ble_linebuf_len = 0;
+        } else if (c != '\r') {
+            if (g_ble_linebuf_len < sizeof(g_ble_linebuf) - 1) {
+                g_ble_linebuf[g_ble_linebuf_len++] = c;
+            } else {
+                /* 行太长，强制刷新 */
+                ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
+                g_ble_linebuf_len = 0;
+                g_ble_linebuf[g_ble_linebuf_len++] = c;
+            }
+        }
     }
-
-    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        return;
-    }
-
-    char *buf = (char *)malloc(len + 1);
-    if (!buf) return;
-
-    memcpy(buf, data, len);
-    buf[len] = '\0';
-
-    if (xQueueSend(g_ble_tx_queue, &buf, pdMS_TO_TICKS(10)) != pdTRUE) {
-        free(buf);
-        g_ble_queue_overflow_count++;
-    }
+    portEXIT_CRITICAL(&g_ble_line_mux);
 }
 
 bool
