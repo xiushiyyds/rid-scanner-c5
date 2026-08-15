@@ -53,3 +53,10 @@ void crid_ble_scan_set_allowed(bool allowed);
 #endif
 
 #endif // CRID_BLE_SCAN_H
+
+/**
+ * lcdfix30: TDD 分时允许开关。
+ * 页面级 allowed 和 TDD 级 tdd_allowed 两者都为 true 时扫描才启动。
+ * TDD WiFi 阶段传 false，BLE 阶段传 true。
+ */
+void crid_ble_scan_set_tdd_allowed(bool allowed);

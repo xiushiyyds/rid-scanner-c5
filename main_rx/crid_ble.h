@@ -88,3 +88,22 @@ void crid_ble_delayed_scan_restart(uint32_t delay_ms);
 #endif
 
 #endif // CRID_BLE_H
+
+/* ================================================================
+ * lcdfix30: BLE 射频让权接口
+ *
+ * ESP32-C5 单射频，WiFi 注入/抓包期间需要减少 BLE 射频占用。
+ * crid_ble_pause_air() 停止 BLE 广播（不断开已有连接），
+ * crid_ble_resume_air() 恢复广播。
+ * ================================================================ */
+
+/**
+ * 暂停 BLE 广播（释放射频给 WiFi）。
+ * 已有 BLE 连接保持不断开，但不再广播新的连接请求。
+ */
+void crid_ble_pause_air(void);
+
+/**
+ * 恢复 BLE 广播。
+ */
+void crid_ble_resume_air(void);

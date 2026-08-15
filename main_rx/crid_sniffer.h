@@ -40,6 +40,12 @@ void crid_sniffer_stop_channel_hold(void);
 /** lcdfix19: 获取当前扫描信道（1/6/11 跳频中） */
 uint8_t crid_sniffer_get_current_channel(void);
 
+/** lcdfix30: 获取当前 TDD 阶段（0=WiFi, 1=BLE） */
+int crid_sniffer_get_tdd_phase(void);
+
+/** lcdfix30: 注册 TDD BLE 暂停/恢复回调 */
+void crid_sniffer_set_ble_tdd_callbacks(void (*pause_cb)(void), void (*resume_cb)(void));
+
 /**
  * v1.3: 停止 sniffer 并释放 Wi-Fi 资源
  * 用于模式切换到模拟模式前调用。

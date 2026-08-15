@@ -251,20 +251,43 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
 }
 
-/* ---- 信道跳频扫描 ----
- * lcdfix19：实测测试模块和绝大多数 RID 设备固定在信道6。
- * 之前 1/6/11 各 1.5s 的均等轮询让信道6只占 1/3 时间，检测明显变慢。
- * 改成偏置跳频：
- *   - 信道6（主信道）长驻 3500ms
- *   - 信道1、11 各快速扫 250ms
- * 一轮 4s 中信道6占 ~87%，检测速度接近固定信道6，同时不漏其他信道的目标。 */
+/* ---- 信道跳频 + WiFi/BLE 分时调度 (TDD) ----
+ * lcdfix30: ESP32-C5 单射频，BLE 扫描和 WiFi sniffer 不能同时有效工作。
+ * 改为分时：WiFi 抓包阶段停 BLE 扫描，BLE 扫描阶段暂停 WiFi promiscuous。
+ * WiFi 占 ~87% 时间，BLE 占 ~13%，两者都能工作且互不抢射频。
+ *
+ * 信道偏置：ch6 长驻，ch1/ch11 快速扫。 */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 6, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {3000, 250, 200, 250};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {2000, 250, 2000, 250};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
+/* lcdfix30: TDD 阶段 */
+typedef enum {
+    TDD_PHASE_WIFI = 0,
+    TDD_PHASE_BLE  = 1,
+} tdd_phase_t;
+static volatile tdd_phase_t s_tdd_phase = TDD_PHASE_WIFI;
+
+/* TDD 回调：由 app_main 注册，用于暂停/恢复 BLE 扫描 */
+typedef void (*tdd_ble_cb_t)(void);
+static tdd_ble_cb_t s_ble_pause_cb  = NULL;
+static tdd_ble_cb_t s_ble_resume_cb = NULL;
+
+/* lcdfix30: TDD 通过回调控制 BLE 扫描，
+ * 不直接调用 scan_set_allowed（那是 app_main 的页面互斥开关）。 */
+void crid_sniffer_set_ble_tdd_callbacks(void (*pause_cb)(void), void (*resume_cb)(void)) {
+    s_ble_pause_cb = pause_cb;
+    s_ble_resume_cb = resume_cb;
+}
+
 uint8_t crid_sniffer_get_current_channel(void) {
     return s_current_channel;
+}
+
+/* lcdfix30: 获取当前 TDD 阶段（供 LCD 显示） */
+int crid_sniffer_get_tdd_phase(void) {
+    return (int)s_tdd_phase;
 }
 
 /* ---- 信道跳频任务 ----
@@ -276,18 +299,27 @@ static TaskHandle_t s_hold_task_handle = NULL;
 
 static void channel_hold_task(void *pvParameter) {
     char msg[64];
-    snprintf(msg, sizeof(msg), "Channel hop: ch6=3000ms, ch1/11=250ms (biased)");
+    snprintf(msg, sizeof(msg), "TDD: WiFi 2s / BLE 300ms (WiFi 87%%)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     uint8_t idx = 0;
-    /* 从信道6开始（SCAN_CHANNELS[1]），与初始 set_channel 一致 */
     for (uint8_t i = 0; i < SCAN_CHANNEL_COUNT; i++) {
         if (SCAN_CHANNELS[i] == 6) { idx = i; break; }
     }
 
+    /* lcdfix30: 诊断统计 */
+    uint32_t diag_counter = 0;
+    uint32_t last_total = 0, last_rid = 0, last_beacon = 0;
+
     while (!s_hold_should_stop) {
+        /* === WiFi 阶段：BLE 扫描停止，WiFi 独占射频 === */
+        s_tdd_phase = TDD_PHASE_WIFI;
+        if (s_ble_pause_cb) s_ble_pause_cb();
+        /* 确保 promiscuous 开着（BLE 阶段可能关了） */
+        esp_wifi_set_promiscuous(true);
+
         uint8_t ch = SCAN_CHANNELS[idx];
         uint16_t dwell = CHANNEL_DWELL_MS_ARR[idx];
         s_current_channel = ch;
@@ -297,12 +329,54 @@ static void channel_hold_task(void *pvParameter) {
             json_warning("RID_SNIFF", msg);
         }
         idx = (idx + 1) % SCAN_CHANNEL_COUNT;
+
         /* 分段 delay，stop 时能快速退出 */
         for (int i = 0; i < (dwell / 100) && !s_hold_should_stop; i++) {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
+
+        if (s_hold_should_stop) break;
+
+        /* === BLE 阶段：暂停 WiFi promiscuous，启动 BLE 扫描 === */
+        s_tdd_phase = TDD_PHASE_BLE;
+        esp_wifi_set_promiscuous(false);
+        if (s_ble_resume_cb) s_ble_resume_cb();
+
+        /* BLE 扫描 300ms */
+        for (int i = 0; i < 3 && !s_hold_should_stop; i++) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        if (s_hold_should_stop) break;
+
+        /* lcdfix30: 每 ~10 轮打印一次诊断 */
+        diag_counter++;
+        if (diag_counter % 5 == 0) {
+            uint32_t cur_total = g_stats.total_packets;
+            uint32_t cur_rid = g_stats.rid_detections;
+            uint32_t cur_beacon = g_stats.beacon_count;
+            uint32_t d_total = cur_total - last_total;
+            uint32_t d_rid = cur_rid - last_rid;
+            uint32_t d_beacon = cur_beacon - last_beacon;
+            last_total = cur_total;
+            last_rid = cur_rid;
+            last_beacon = cur_beacon;
+            snprintf(msg, sizeof(msg),
+                     "Diag: total=%lu(+%lu) mgmt=+%lu RID=%lu(+%lu) ch=%u",
+                     (unsigned long)cur_total, (unsigned long)d_total,
+                     (unsigned long)d_beacon,
+                     (unsigned long)cur_rid, (unsigned long)d_rid,
+                     s_current_channel);
+            json_debug("RID_SNIFF", msg);
+        }
     }
-    s_hold_should_stop = false;  /* 复位，供下次 init 重新使用 */
+
+    /* 退出时恢复 WiFi promiscuous 并停 BLE 扫描 */
+    s_tdd_phase = TDD_PHASE_WIFI;
+    if (s_ble_pause_cb) s_ble_pause_cb();
+    esp_wifi_set_promiscuous(true);
+
+    s_hold_should_stop = false;
     s_hold_task_handle = NULL;
     vTaskDelete(NULL);
 }

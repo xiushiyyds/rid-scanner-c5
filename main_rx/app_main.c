@@ -44,7 +44,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix29"
+#define CRID_VERSION_STRING "1.9.9-lcdfix30"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -118,7 +118,7 @@ static sim_config_t s_sim_config;
 static esp_err_t detect_stop(void) {
     if (!s_detect_active) return ESP_OK;
     ESP_LOGI("MODE", "Detect STOP: halting BLE scan + WiFi sniffer");
-    /* 先关扫描允许开关，挡住 BLE 连接/断开事件里的延迟重启 */
+    /* lcdfix30: 先关扫描允许开关，挡住 BLE 连接/断开事件里的延迟重启 */
     crid_ble_scan_set_allowed(false);
     crid_sniffer_stop_channel_hold();
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -130,18 +130,28 @@ static esp_err_t detect_stop(void) {
     return ESP_OK;
 }
 
+/* lcdfix30: TDD BLE 回调——WiFi 阶段禁止 BLE 扫描，BLE 阶段允许 */
+static void tdd_ble_pause(void) {
+    crid_ble_scan_set_tdd_allowed(false);
+}
+static void tdd_ble_resume(void) {
+    crid_ble_scan_set_tdd_allowed(true);
+}
+
 static esp_err_t detect_start(void) {
     if (s_detect_active) return ESP_OK;
-    ESP_LOGI("MODE", "Detect START: WiFi sniffer + BLE scan");
-    /* 先开扫描允许，再 init sniffer + start scan */
+    ESP_LOGI("MODE", "Detect START: WiFi sniffer + BLE TDD scan");
+    /* lcdfix30: 开页面级扫描允许。TDD 级开关由 channel_hold_task 控制 */
     crid_ble_scan_set_allowed(true);
+    crid_ble_scan_set_tdd_allowed(false);  /* 初始 WiFi 阶段先关 BLE */
     esp_err_t ret = crid_sniffer_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sniffer re-init failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    /* lcdfix30: 注册 TDD 回调，由 channel_hold_task 分时调度 BLE 扫描 */
+    crid_sniffer_set_ble_tdd_callbacks(tdd_ble_pause, tdd_ble_resume);
     crid_sniffer_start_channel_hold();
-    crid_ble_scan_start();
     s_detect_active = true;
     return ESP_OK;
 }
@@ -208,6 +218,10 @@ static esp_err_t switch_to_simulate_mode(int target_count) {
     /* 给 WiFi 控制器足够时间完全释放后再 init AP */
     vTaskDelay(pdMS_TO_TICKS(400));
 
+    /* lcdfix30: 暂停 BLE 广播，减少射频抢占，让注入帧完整发出。
+     * 已有 NUS 连接不断开，GATT 通知仍可工作。 */
+    crid_ble_pause_air();
+
     esp_err_t ret = sim_init();
     if (ret != ESP_OK) {
         ESP_LOGE("MODE", "Sim init failed: %s", esp_err_to_name(ret));
@@ -243,6 +257,9 @@ static esp_err_t switch_to_scan_mode(void) {
 
     sim_stop();
     vTaskDelay(pdMS_TO_TICKS(400));
+
+    /* lcdfix30: 恢复 BLE 广播 */
+    crid_ble_resume_air();
 
     esp_err_t ret = detect_start();
     if (ret != ESP_OK) {
@@ -719,7 +736,9 @@ static void mode_switch_task(void *arg) {
                     if (s_device_mode == MODE_SIMULATE) {
                         switch_to_scan_mode();
                     } else {
-                        /* 只是在配置页待过、没发射：恢复侦测即可 */
+                        /* 只是在配置页待过、没发射：恢复侦测 + BLE 广播即可 */
+                        /* lcdfix30: 恢复 BLE 广播 */
+                        crid_ble_resume_air();
                         detect_start();
                         s_sim_armed = false;
                         push_sim_status_to_phone();
@@ -1079,6 +1098,9 @@ void app_main(void) {
         json_error("RID_MAIN", "Sniffer init failed!");
         return;
     }
+
+    // lcdfix30: 注册 TDD BLE 回调，由 channel_hold_task 分时调度
+    crid_sniffer_set_ble_tdd_callbacks(tdd_ble_pause, tdd_ble_resume);
 
     // 7. 创建任务
     BaseType_t task_created;

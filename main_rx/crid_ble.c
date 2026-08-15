@@ -184,6 +184,9 @@ static bool g_ble_initialized = false;
 static esp_timer_handle_t g_adv_timer = NULL;
 #define ADV_TIMEOUT_US (60 * 1000 * 1000)  /* 60秒 */
 
+/* lcdfix30: 射频暂停标志（前向声明） */
+static volatile bool s_adv_paused = false;
+
 /* lcdfix27: 退回 legacy advertising，不再需要 ext_adv instance */
 
 /* ================================================================
@@ -267,6 +270,10 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
 
 /* 广播超时回调：60秒无人连接则重启广播 */
 static void adv_timeout_cb(void *arg) {
+    /* lcdfix30: 如果射频被暂停（WiFi 发射/侦测中），不重启广播 */
+    if (s_adv_paused) {
+        return;
+    }
     ESP_LOGI(TAG, "No BLE connection for 60s, restarting advertising");
     ble_gap_adv_stop();
     g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -788,4 +795,35 @@ bool
 crid_ble_is_connected(void)
 {
     return g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+/* ================================================================
+ * lcdfix30: BLE 射频让权
+ *
+ * 模拟发射期间暂停 BLE 广播，减少射频抢占。
+ * 已有连接不断开，GATT 通知仍可工作（连接事件间隔已放宽到 30~50ms）。
+ * ================================================================ */
+
+void crid_ble_pause_air(void) {
+    if (s_adv_paused) return;
+    s_adv_paused = true;
+    ESP_LOGI(TAG, "Pausing BLE advertising for WiFi TX/RX");
+    /* 停止广播（如果正在广播） */
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_adv_stop();
+    }
+    /* 停掉广播超时定时器 */
+    if (g_adv_timer) {
+        esp_timer_stop(g_adv_timer);
+    }
+}
+
+void crid_ble_resume_air(void) {
+    if (!s_adv_paused) return;
+    s_adv_paused = false;
+    ESP_LOGI(TAG, "Resuming BLE advertising");
+    /* 只有未连接时才恢复广播 */
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ble_advertise_start();
+    }
 }

@@ -1,7 +1,19 @@
 /**
- * sim_wifi.c — 模拟器 Wi-Fi AP 模式实现
+ * sim_wifi.c — 模拟器 Wi-Fi raw 802.11 帧注入（STA 模式）
  *
- * 支持可配置发射功率，适配多目标场景。
+ * lcdfix30: 从 AP 模式改为 STA 模式注入。
+ *
+ * 根本原因：AP 模式下 ESP32 WiFi 协议栈每 100ms 自动发送一个
+ * 带 SSID 的标准 Beacon，这个 Beacon 不含 RID Vendor IE，但肩灯
+ * 收到 WiFi Beacon 就会报警（检测到射频活动），却解析不到无人机
+ * 信息。同时 AP 协议栈与 BLE 共存时会产生射频调度冲突，导致我们
+ * 通过 esp_wifi_80211_tx 注入的自定义 Beacon 被丢弃或截断。
+ *
+ * 改用 WIFI_MODE_STA 后：
+ *   - 不会自动发 Beacon，只有我们注入的 RID 帧
+ *   - 不连接任何 AP，纯 NULL 功能
+ *   - promiscuous 注入模式稳定工作
+ *   - 与 BLE 共存冲突大幅减少
  */
 
 #include "sdkconfig.h"
@@ -16,31 +28,21 @@
 
 static const char *TAG = "SIM_WIFI";
 
-#define AP_DEFAULT_PASSWORD "12345678"
-
-/* 当前信道（动态切换时记录） */
+/* 当前信道 */
 static uint8_t s_current_channel = 6;
 
-/* lcdfix16: 记录 AP netif 是否已创建，避免每次 sim_wifi_init 都
- * 调 esp_netif_create_default_wifi_ap() 造成 netif 对象泄漏。
- * sniffer deinit 不会销毁 default netif，重复创建会让 AP 起不来。 */
-static esp_netif_t *s_ap_netif = NULL;
-
-/* lcdfix16: 跟踪 esp_wifi_init 状态。
- * 模式切换时如果上一次 esp_wifi_deinit 没有真正完全释放，
- * 再调 esp_wifi_init 会失败，但 WiFi 实际上仍然可用。
- * 用静态标志避免重复 init，比依赖不存在的 ESP_ERR_WIFI_INITED 可靠。 */
+/* 跟踪 WiFi 初始化状态 */
 static bool s_wifi_inited = false;
+static esp_netif_t *s_sta_netif = NULL;
 
 esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
     esp_err_t ret;
+    (void)ssid; /* STA 模式不广播 SSID，参数保留兼容 */
 
     if (!s_wifi_inited) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         ret = esp_wifi_init(&cfg);
         if (ret != ESP_OK) {
-            /* 某些模式切换路径下 controller 没完全 deinit，
-             * 继续走 set_mode/start，通常能恢复。 */
             ESP_LOGW(TAG, "esp_wifi_init returned %s (assuming already inited)",
                      esp_err_to_name(ret));
         }
@@ -49,38 +51,24 @@ esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
         ESP_LOGI(TAG, "Wi-Fi already initialized, reusing driver");
     }
 
-    /* 只在第一次创建 AP netif，后续模式切换复用 */
-    if (s_ap_netif == NULL) {
-        s_ap_netif = esp_netif_create_default_wifi_ap();
-        if (s_ap_netif == NULL) {
-            ESP_LOGW(TAG, "esp_netif_create_default_wifi_ap returned NULL (may already exist)");
+    /* STA netif（不连接任何 AP，纯用于 raw TX） */
+    if (s_sta_netif == NULL) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+        if (s_sta_netif == NULL) {
+            ESP_LOGW(TAG, "esp_netif_create_default_wifi_sta returned NULL");
         }
     }
 
-    wifi_config_t ap_config = { 0 };
-    const char *ap_ssid = (ssid != NULL && ssid[0] != '\0') ? ssid : "NekolunaRID-SIM";
-
-    snprintf((char *)ap_config.ap.ssid, sizeof(ap_config.ap.ssid), "%s", ap_ssid);
-    ap_config.ap.ssid_len = strlen((char *)ap_config.ap.ssid);
-    ap_config.ap.channel = channel;
-    ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    strncpy((char *)ap_config.ap.password, AP_DEFAULT_PASSWORD,
-            sizeof(ap_config.ap.password) - 1);
-    ap_config.ap.password[sizeof(ap_config.ap.password) - 1] = '\0';
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.beacon_interval = 100;
-
-    ret = esp_wifi_set_mode(WIFI_MODE_AP);
+    /* lcdfix30: 使用 STA 模式，而非 AP 模式。
+     * STA 模式不会自动发送 Beacon，esp_wifi_80211_tx 注入的
+     * 帧是空中唯一的帧，避免 AP 自动 Beacon 与注入帧冲突。 */
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_mode failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    ret = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_config(AP) failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    /* 不需要 set_config for STA（不连接 AP） */
 
     /* 设置发射功率：tx_power 单位为 0.25dBm */
     esp_wifi_set_max_tx_power(tx_power);
@@ -91,21 +79,22 @@ esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
         return ret;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(300));
     /* 再次确认功率设置 */
     esp_wifi_set_max_tx_power(tx_power);
 
-    /* 强制锁定信道（AP 启动后再次确认，防止信道漂移） */
+    /* 锁定信道 */
     ret = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_channel failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    /* lcdfix28 修复：AP 模式下用 esp_wifi_80211_tx 发送自定义源 MAC 的原始 RID
-     * Beacon，必须开启 promiscuous 注入模式。否则控制器按普通 AP 帧处理，伪造的
-     * Vendor IE 内容发不出去——肩灯能收到射频能量报警，但解析不到无人机信息。
-     * （lcdfix16 误删此项，理由是"没注册回调"，但 promiscuous 注入不需要回调。） */
+    /* 注册空的 promiscuous RX 回调。
+     * 某些 IDF 版本要求 set_promiscuous(true) 之前必须注册回调，
+     * 否则注入功能可能不工作。我们不需要收包，回调直接返回。 */
+    /* 注意：不注册过滤，只设置 promiscuous 用于 TX 注入 */
+
     ret = esp_wifi_set_promiscuous(true);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_promiscuous failed: %s", esp_err_to_name(ret));
@@ -114,8 +103,8 @@ esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
 
     s_current_channel = channel;
 
-    ESP_LOGI(TAG, "Wi-Fi AP init OK: ch=%u, SSID=%s, tx_power=%d (0.25dBm) = %.1f dBm",
-             channel, ap_config.ap.ssid, tx_power, tx_power * 0.25f);
+    ESP_LOGI(TAG, "Wi-Fi STA injection init OK: ch=%u, tx_power=%d (%.1f dBm)",
+             channel, tx_power, tx_power * 0.25f);
     return ESP_OK;
 }
 
@@ -124,7 +113,10 @@ esp_err_t sim_wifi_send_raw_frame(const uint8_t *frame, uint16_t len) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t ret = esp_wifi_80211_tx(WIFI_IF_AP, frame, len, false);
+    /* lcdfix30: 使用 WIFI_IF_STA 发送。
+     * en_sys_seq=true 让硬件自动处理序列号，避免 AP 模式下
+     * 序列号冲突。对于无连接的 raw 帧注入，这是推荐做法。 */
+    esp_err_t ret = esp_wifi_80211_tx(WIFI_IF_STA, frame, len, true);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_80211_tx failed: %s", esp_err_to_name(ret));
     }
@@ -132,7 +124,7 @@ esp_err_t sim_wifi_send_raw_frame(const uint8_t *frame, uint16_t len) {
 }
 
 esp_err_t sim_wifi_deinit(void) {
-    ESP_LOGI(TAG, "Stopping Wi-Fi AP mode...");
+    ESP_LOGI(TAG, "Stopping Wi-Fi STA injection...");
 
     esp_err_t ret;
 
@@ -150,11 +142,10 @@ esp_err_t sim_wifi_deinit(void) {
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_deinit failed: %s", esp_err_to_name(ret));
     }
-    /* lcdfix16: 复位初始化标志。即使 deinit 返回错误，也认为
-     * WiFi 驱动已释放；下次 init 会重新 esp_wifi_init。 */
     s_wifi_inited = false;
 
-    ESP_LOGI(TAG, "Wi-Fi AP mode released");
+    /* 注意：不销毁 s_sta_netif，模式切换时复用避免泄漏 */
+    ESP_LOGI(TAG, "Wi-Fi STA injection released");
     return ESP_OK;
 }
 
@@ -163,7 +154,7 @@ esp_err_t sim_wifi_set_channel(uint8_t channel) {
         return ESP_ERR_INVALID_ARG;
     }
     if (channel == s_current_channel) {
-        return ESP_OK;  /* 无需切换 */
+        return ESP_OK;
     }
 
     esp_err_t ret = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
