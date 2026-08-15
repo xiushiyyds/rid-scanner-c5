@@ -202,6 +202,49 @@ static void parser_task(void *pvParameter) {
                 }
             }
 
+            /* v2.0.5: DJI 路径也做跨 MAC 合并（DJI DroneID 用固定 SN 但 WiFi MAC 随机） */
+            if (uav->basic_id.valid && uav->basic_id.uas_id[0] != '\0') {
+                uav_track_t *existing = crid_tracker_find_by_uas_id(uav->basic_id.uas_id);
+                if (existing != NULL && existing != uav) {
+                    existing->msg_count += uav->msg_count;
+                    existing->last_seen_ms = uav->last_seen_ms;
+                    existing->last_rssi = uav->last_rssi;
+                    existing->last_channel = uav->last_channel;
+                    existing->is_dji = true;
+                    existing->dji_type = uav->dji_type;
+                    existing->dji_model_code = uav->dji_model_code;
+                    if (uav->location.latitude != 0 || uav->location.longitude != 0)
+                        existing->location = uav->location;
+                    if (uav->basic_id.valid)
+                        existing->basic_id = uav->basic_id;
+                    if (uav->dji_serial[0]) {
+                        strncpy(existing->dji_serial, uav->dji_serial,
+                                sizeof(existing->dji_serial) - 1);
+                        existing->dji_serial[sizeof(existing->dji_serial) - 1] = '\0';
+                    }
+                    if (uav->dji_model[0]) {
+                        strncpy(existing->dji_model, uav->dji_model,
+                                sizeof(existing->dji_model) - 1);
+                        existing->dji_model[sizeof(existing->dji_model) - 1] = '\0';
+                    }
+                    existing->dji_latitude = uav->dji_latitude;
+                    existing->dji_longitude = uav->dji_longitude;
+                    existing->dji_altitude = uav->dji_altitude;
+                    existing->dji_height = uav->dji_height;
+                    existing->dji_speed_h = uav->dji_speed_h;
+                    existing->dji_speed_v = uav->dji_speed_v;
+                    existing->dji_heading = uav->dji_heading;
+                    existing->dji_pilot_lat = uav->dji_pilot_lat;
+                    existing->dji_pilot_lon = uav->dji_pilot_lon;
+                    strncpy(existing->dji_identification, uav->dji_identification,
+                            sizeof(existing->dji_identification) - 1);
+                    uav->active = false;
+                    uav->msg_count = 0;
+                    uav = existing;
+                    was_new = false;
+                }
+            }
+
             xSemaphoreGive(mutex);
 
             if (was_new) json_uav_discovery(uav);
@@ -245,7 +288,11 @@ static void parser_task(void *pvParameter) {
 
         crid_parser_extract_layered(uav);
 
-        if (was_new && uav->basic_id.valid && uav->basic_id.uas_id[0] != '\0') {
+        /* v2.0.5: 每次收到 BasicID 都检查跨 MAC 合并（不再限定 was_new）。
+         * 无人机 RID 广播每 1-3 秒随机换 MAC，旧 MAC 的 track 上已有 SN，
+         * 新 MAC 第一次收到 BasicID 时也应合并到同一 track，否则每个随机 MAC
+         * 都会在网页上变成重复目标。 */
+        if (uav->basic_id.valid && uav->basic_id.uas_id[0] != '\0') {
             uav_track_t *existing = crid_tracker_find_by_uas_id(uav->basic_id.uas_id);
             if (existing != NULL && existing != uav) {
                 existing->msg_count += uav->msg_count;
@@ -257,13 +304,20 @@ static void parser_task(void *pvParameter) {
                 existing->oui[2] = uav->oui[2];
                 existing->transport = uav->transport;
                 existing->protocol = uav->protocol;
+                /* 只合并有效字段，不盲目覆盖已有数据 */
+                if (uav->location.latitude != 0 || uav->location.longitude != 0)
+                    existing->location = uav->location;
+                if (uav->basic_id.valid)
+                    existing->basic_id = uav->basic_id;
+                if (uav->system.valid)
+                    existing->system = uav->system;
+                if (uav->self_id.valid)
+                    existing->self_id = uav->self_id;
+                if (uav->operator_id.valid)
+                    existing->operator_id = uav->operator_id;
+                if (uav->gb46750.valid)
+                    existing->gb46750 = uav->gb46750;
                 existing->uas_data = uav->uas_data;
-                existing->basic_id = uav->basic_id;
-                existing->location = uav->location;
-                existing->system = uav->system;
-                existing->self_id = uav->self_id;
-                existing->operator_id = uav->operator_id;
-                existing->gb46750 = uav->gb46750;
                 existing->last_pack = uav->last_pack;
                 if (uav->is_dji) {
                     existing->is_dji   = true;

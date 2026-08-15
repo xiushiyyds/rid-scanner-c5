@@ -245,6 +245,14 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGW(TAG, "Disconnected (reason=0x%04x)", event->disconnect.reason);
         g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         crid_ble_reset_pair();
+        /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
+         * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
+        portENTER_CRITICAL(&g_ble_line_mux);
+        if (g_ble_linebuf_len > 0) {
+            ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
+            g_ble_linebuf_len = 0;
+        }
+        portEXIT_CRITICAL(&g_ble_line_mux);
         /* 断开后恢复高占空比连续扫描 */
         crid_ble_scan_set_duty_high();
         ble_advertise_start();

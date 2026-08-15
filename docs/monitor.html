@@ -1189,6 +1189,40 @@ function parseResp(text){
         document.getElementById('targetListCount').textContent = Object.keys(droneData).length;
         return;
       }
+      // v2.0.5: 固件主动通知目标超时（30s无信号），立即从地图移除
+      if(msg.evt === 'uav_timeout' && msg.mac){
+        const macId = 'MAC_'+msg.mac;
+        // 找到该 MAC 对应的追踪 ID（可能已合并为 SN）
+        let removedId = null;
+        if(droneData[macId]) removedId = macId;
+        else {
+          // MAC 可能已被合并到 SN，找到包含该 MAC 的 SN 条目
+          for(const sid in droneData){
+            if(droneData[sid]._macs && droneData[sid]._macs[msg.mac]){
+              // 该 SN 下还有其他 MAC 在活跃，不删除，只移除这个 MAC 记录
+              delete droneData[sid]._macs[msg.mac];
+              // 但如果该 SN 没有任何活跃 MAC 了，就删除
+              if(Object.keys(droneData[sid]._macs).length===0) removedId = sid;
+              break;
+            }
+          }
+        }
+        if(removedId){
+          if(droneMarkers[removedId]){
+            map.remove(droneMarkers[removedId]);
+            if(droneMarkers[removedId]._trailLine) map.remove(droneMarkers[removedId]._trailLine);
+            if(droneMarkers[removedId]._opLine) map.remove(droneMarkers[removedId]._opLine);
+            delete droneMarkers[removedId];
+          }
+          if(operatorMarkers[removedId]){ map.remove(operatorMarkers[removedId]); delete operatorMarkers[removedId]; }
+          delete droneTrails[removedId];
+          delete droneData[removedId];
+          document.getElementById('activeTargets').textContent = Object.keys(droneData).length;
+          document.getElementById('mapTargetCount').textContent = Object.keys(droneMarkers).length;
+          document.getElementById('targetListCount').textContent = Object.keys(droneData).length;
+        }
+        return;
+      }
       // uav_status：紧凑格式（顶层 lat/lon，非 location.latitude），同样更新位置
       if(msg.evt === 'uav_status' && msg.lat !== undefined && msg.lon !== undefined){
         const id = (msg.basic_id && msg.basic_id.uas_id) ? msg.basic_id.uas_id : (msg.id || ('UAV_'+(msg.ts||'')));
@@ -1215,19 +1249,47 @@ function parseResp(text){
         // 有 SN 用 SN 做 ID；无 SN 用 MAC 做临时 ID，等收到 SN 后合并
         const hasSN = msg.basic_id && msg.basic_id.uas_id && msg.basic_id.uas_id.length > 0;
         const sn = hasSN ? msg.basic_id.uas_id : null;
-        let id = sn || ('MAC_'+msg.mac);
+        const macId = 'MAC_'+msg.mac;
+        let id;
 
-        // 如果之前用 MAC 临时 ID 追踪过，现在收到 SN，把旧 ID 的数据迁移过来
         if(sn){
-          const macId = 'MAC_'+msg.mac;
-          if(droneData[macId] && !droneData[sn]){
-            droneData[sn] = droneData[macId];
-            if(droneMarkers[macId]){ droneMarkers[sn] = droneMarkers[macId]; delete droneMarkers[macId]; }
-            if(droneTrails[macId]){ droneTrails[sn] = droneTrails[macId]; delete droneTrails[macId]; }
-            if(operatorMarkers[macId]){ operatorMarkers[sn] = operatorMarkers[macId]; delete operatorMarkers[macId]; }
+          id = sn;
+          // v2.0.5: 记录此 SN 关联的所有 MAC，用于 uav_timeout 判断
+          if(!droneData[sn]) droneData[sn] = { history: [], _macs: {} };
+          if(!droneData[sn]._macs) droneData[sn]._macs = {};
+          droneData[sn]._macs[msg.mac] = Date.now();
+
+          // 如果之前用此 MAC 的临时 ID 追踪过，迁移到 SN
+          if(droneData[macId]){
+            const old = droneData[macId];
+            // 合并 history 轨迹，不丢失
+            if(old.history && old.history.length){
+              if(!droneData[sn].history) droneData[sn].history = [];
+              droneData[sn].history = old.history.concat(droneData[sn].history||[]);
+              if(droneData[sn].history.length > 100) droneData[sn].history = droneData[sn].history.slice(-100);
+            }
+            // 迁移地图标记
+            if(droneMarkers[macId] && !droneMarkers[sn]){
+              droneMarkers[sn] = droneMarkers[macId];
+            } else if(droneMarkers[macId]){
+              map.remove(droneMarkers[macId]);
+            }
+            delete droneMarkers[macId];
+            if(droneTrails[macId] && !droneTrails[sn]) droneTrails[sn] = droneTrails[macId];
+            delete droneTrails[macId];
+            if(operatorMarkers[macId] && !operatorMarkers[sn]) operatorMarkers[sn] = operatorMarkers[macId];
+            else if(operatorMarkers[macId]) map.remove(operatorMarkers[macId]);
+            delete operatorMarkers[macId];
+            // 保留 SN 已有数据，只补充旧 MAC 数据中 SN 没有的字段
+            Object.keys(old).forEach(k=>{
+              if(k!=='history' && k!=='_macs' && droneData[sn][k]===undefined) droneData[sn][k]=old[k];
+            });
             delete droneData[macId];
             addLog('info','[合并] MAC '+msg.mac+' → SN '+sn);
           }
+        } else {
+          id = macId;
+          if(!droneData[id]) droneData[id] = { history: [] };
         }
         // 相对高度优先，备选气压高度，再选大地高度
         const relAlt = (loc.height !== undefined && loc.height !== null) ? loc.height : null;

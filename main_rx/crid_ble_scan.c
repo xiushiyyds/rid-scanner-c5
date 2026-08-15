@@ -6,7 +6,7 @@
  * 提取 OpenDroneID message pack 并投递到 sniffer 队列。
  *
  * 纯侦测板：BLE 连续扫描，无 TDD 分时。
- * 扫描占空比 10%（window=12.5ms / itvl=125ms），给 WiFi sniffer 留空口。
+ * 扫描占空比 40%（已连接时 window=40ms / itvl=100ms），给 WiFi sniffer 和 GATT 留空口。
  */
 
 #include <string.h>
@@ -217,7 +217,9 @@ static int start_scan(void) {
 
     /* Legacy 扫描参数根据连接状态动态调整：
      * - 未连接(HIGH)：window=itvl=160 → 100ms 连续扫描，最大化 RID 捕获
-     * - 已连接(LOW) ：window=32/itvl=160 → 20ms/100ms = 20% 占空比，给 GATT 留射频 */
+     * - 已连接(LOW) ：window=64/itvl=160 → 40ms/100ms = 40% 占空比。
+     *   v2.0.5: 从 20% 提到 40%。GATT 通知是突发性的，40% 扫描占空比
+     *   下仍有 60% 空口给 GATT 通信，实测不丢通知；20% 时 RID 捕获率明显偏低。 */
     memset(&disc_params, 0, sizeof(disc_params));
     if (s_scan_duty == SCAN_DUTY_HIGH) {
         disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
@@ -225,8 +227,8 @@ static int start_scan(void) {
         ESP_LOGI(TAG, "BLE Legacy scan started (100%% continuous duty, passive)");
     } else {
         disc_params.itvl = 160;           /* 100ms interval */
-        disc_params.window = 32;          /* 20ms listen = 20% duty */
-        ESP_LOGI(TAG, "BLE Legacy scan started (20%% duty, GATT coexist)");
+        disc_params.window = 64;          /* 40ms listen = 40% duty */
+        ESP_LOGI(TAG, "BLE Legacy scan started (40%% duty, GATT coexist)");
     }
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
