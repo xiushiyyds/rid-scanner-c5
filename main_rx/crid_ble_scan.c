@@ -266,7 +266,10 @@ static int start_scan(void) {
     coded_params.window = 48;
     coded_params.passive = 1;
 
-    rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC,
+    /* lcdfix23: own_addr_type 用 BLE_OWN_ADDR_RANDOM。
+     * passive scan 不发 scan request，地址类型不影响接收，
+     * 但部分控制器在无公共地址时传 PUBLIC 会拒绝启动扫描。 */
+    rc = ble_gap_ext_disc(BLE_OWN_ADDR_RANDOM,
                           0,      /* duration: 连续 */
                           0,      /* period: 连续 */
                           0,      /* filter_duplicates: 关闭 */
@@ -296,7 +299,7 @@ static int start_scan(void) {
     disc_params.passive = 1;          /* passive scan，不发 scan request */
     disc_params.filter_duplicates = 0;
 
-    rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
+    rc = ble_gap_disc(BLE_OWN_ADDR_RANDOM, BLE_HS_FOREVER,
                       &disc_params, ble_scan_gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start BLE legacy scan: %d", rc);

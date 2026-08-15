@@ -568,12 +568,22 @@ ble_on_sync(void)
 {
     ESP_LOGI(TAG, "NimBLE host synced");
 
-    /* lcdfix22: 必须先推断实际可用的地址类型。
-     * ESP32-C5 可能没有烧录公共地址，ble_hs_util_ensure_addr(0) 会自动
-     * 生成一个静态随机地址；ble_hs_id_infer_auto 据此返回正确的类型。
-     * 不做这步而硬编码 BLE_OWN_ADDR_PUBLIC，ext_adv_configure 可能在
-     * 控制器层失败，手机完全搜不到广播。 */
-    int rc = ble_hs_id_infer_auto(0, &g_own_addr_type);
+    /* lcdfix23: 必须在 on_sync 中按官方标准顺序执行：
+     *   1) ble_hs_util_ensure_addr(0) — 确保 controller 已配置身份地址
+     *      （优先公共地址；不存在则自动生成静态随机地址）
+     *   2) ble_hs_id_infer_auto(0, &type) — 推断当前可用的地址类型
+     *
+     * lcdfix22 的错误：ensure_addr 被错误放在了 crid_ble_init() 中，
+     * 那时 NimBLE host 尚未启动、controller 未就绪，调用等于空操作；
+     * 而 on_sync 中直接 infer_auto 没有先 ensure_addr，导致板子无公共
+     * 地址时身份地址未生成，ext_adv 即使返回 0 也不发射广播。
+     * 参照 ESP-IDF v5.5.2 bleprph 示例。 */
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_util_ensure_addr failed (rc=%d)", rc);
+    }
+
+    rc = ble_hs_id_infer_auto(0, &g_own_addr_type);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_hs_id_infer_auto failed (rc=%d)", rc);
     } else {
@@ -736,11 +746,9 @@ crid_ble_init(void)
         return err;
     }
 
-    /* 确保使用公共地址（BLE_OWN_ADDR_PUBLIC 需要身份地址已配置） */
-    int rc = ble_hs_util_ensure_addr(0);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "ble_hs_util_ensure_addr returned %d (non-fatal)", rc);
-    }
+    /* lcdfix23: ble_hs_util_ensure_addr(0) 已移至 ble_on_sync() 中，
+     * 必须在 NimBLE host 启动并 sync 后调用才有效。此处调用时 controller
+     * 尚未就绪，是空操作。地址设置详见 on_sync 注释。 */
 
     /* 注册 GATT 服务 */
     rc = ble_gatts_count_cfg(gatt_svr_svcs);
