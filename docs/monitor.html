@@ -445,6 +445,39 @@ const droneData = {}; // id -> { wgs_lat, wgs_lon, gcj_lat, gcj_lon, alt, speed,
 
 // ============ 地图 ============
 let map=null, droneMarkers={}, droneTrails={}, centerMarker=null, operatorMarkers={};
+let accuracyCircle=null;  // GPS精度圆圈
+
+// ============ GPS 滑动窗口平滑滤波 ============
+const GPS_WINDOW_SIZE = 5;  // 取最近5次(约15秒)坐标平均
+const gpsWindow = [];       // [{lat, lon, t}]
+function gpsSmoothPush(lat, lon) {
+  const now = Date.now();
+  gpsWindow.push({lat, lon, t: now});
+  // 只保留最近30秒内的数据
+  while(gpsWindow.length > GPS_WINDOW_SIZE || (gpsWindow.length>0 && now-gpsWindow[0].t>30000)) {
+    gpsWindow.shift();
+  }
+  if(gpsWindow.length===0) return {lat, lon, count:1, spread:0};
+  let sLat=0, sLon=0;
+  gpsWindow.forEach(p=>{sLat+=p.lat;sLon+=p.lon;});
+  const avgLat=sLat/gpsWindow.length, avgLon=sLon/gpsWindow.length;
+  // 计算离散度(米)，用于精度圆圈
+  let spread=0;
+  if(gpsWindow.length>=2){
+    gpsWindow.forEach(p=>{
+      const d=calcDistanceM(p.lat,p.lon,avgLat,avgLon);
+      if(d>spread) spread=d;
+    });
+  }
+  return {lat:avgLat, lon:avgLon, count:gpsWindow.length, spread};
+}
+// 两点距离(米)，Haversine 简化版
+function calcDistanceM(lat1,lon1,lat2,lon2){
+  const R=6371000, toRad=Math.PI/180;
+  const dLat=(lat2-lat1)*toRad, dLon=(lon2-lon1)*toRad;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(a));
+}
 
 function initMap() {
   AMapLoader.load({
@@ -1253,16 +1286,20 @@ function parseResp(text){
       updateTargetList(id);
     }
   }
-  // SELF_GPS:lat,lon,alt,sats — 板子自身GPS定位（每3秒一次）
+  // SELF_GPS:lat,lon,alt,sats[,hdop] — 板子自身GPS定位（每3秒一次）
   // 未定位时固件发送 SELF_GPS:0,0,0,0
   if(text.startsWith('SELF_GPS:')){
     const p=text.substring(9).split(',');
     if(p.length>=2){
       const lat=+p[0],lon=+p[1],alt=p[2]?+p[2]:0,sats=parseInt(p[3])||0;
+      const hdop=p[4]?parseFloat(p[4]):0;  // v2.0.5+ 会带HDOP
       // 有效定位：纬度/经度非零且卫星数>0
       const valid = (lat!==0 && lon!==0 && sats>0);
       if(valid && map && centerMarker){
-        const [gcjLng,gcjLat]=wgs84ToGcj02(lon,lat);
+        // 滑动窗口平滑滤波
+        const sm=gpsSmoothPush(lat,lon);
+        // 用平滑后的坐标转换GCJ-02
+        const [gcjLng,gcjLat]=wgs84ToGcj02(sm.lon,sm.lat);
         const isFirstGps = !centerMarker._selfGps;
         centerMarker._selfGps = true;
         // 移除旧标记重建（兼容 AMap 2.0）
@@ -1274,10 +1311,25 @@ function parseResp(text){
         });
         map.add(centerMarker);
         centerMarker.show();
+        // 精度圆圈：半径取 HDOP*5米 和 实际离散度 的较大值
+        const hdopRadius = hdop>0 ? hdop*5 : 0;
+        const circleRadius = Math.max(hdopRadius, sm.spread, 15); // 至少15米
+        if(accuracyCircle) map.remove(accuracyCircle);
+        accuracyCircle = new AMap.Circle({
+          center:[gcjLng,gcjLat],
+          radius: circleRadius,
+          strokeColor:'#409eff', strokeWeight:1, strokeOpacity:0.6,
+          fillColor:'#409eff', fillOpacity:0.08,
+          strokeStyle:'dashed'
+        });
+        map.add(accuracyCircle);
         // 仅首次GPS定位时自动居中
         if(isFirstGps) map.setCenter([gcjLng,gcjLat]);
-        document.getElementById('gpsStat').innerHTML='GPS(WGS): <span class="val">'+lat.toFixed(4)+','+lon.toFixed(4)+' ('+sats+'星)</span>';
-        document.getElementById('gpsStatus').textContent=sats+'星定位';
+        // 状态显示：卫星数 + HDOP + 精度
+        const hdopStr = hdop>0 ? ` HDOP:${hdop.toFixed(1)}` : '';
+        const qualityStr = hdop>0 ? (hdop<1.5?'优秀':hdop<3?'良好':hdop<5?'一般':'较差') : '';
+        document.getElementById('gpsStat').innerHTML=`GPS: <span class="val">${lat.toFixed(5)},${lon.toFixed(4)} (${sats}星${hdopStr} ±${circleRadius.toFixed(0)}m)</span>`;
+        document.getElementById('gpsStatus').innerHTML = sats+'星'+(qualityStr?` <span style="color:${hdop<2?'#67c23a':hdop<4?'#e6a23c':'#f56c6c'}">${qualityStr}</span>`:'定位');
         document.getElementById('gpsStatus').className='value green';
       } else if(!valid) {
         // 未定位：不移动地图标记，只更新状态文字

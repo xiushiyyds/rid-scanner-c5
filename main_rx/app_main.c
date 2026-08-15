@@ -46,7 +46,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.0.0-detector"
+#define CRID_VERSION_STRING "2.0.5-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -381,8 +381,9 @@ static void gps_report_task(void *arg) {
     while (1) {
         gps_data_t gd = gps_get_data();
         if (gd.valid && gd.fix_quality > 0) {
-            snprintf(buf, sizeof(buf), "SELF_GPS:%.6f,%.6f,%.1f,%d\n",
-                     gd.latitude, gd.longitude, gd.altitude, gd.satellites);
+            /* v2.0.5: 增加 HDOP 字段，手机端用于精度圆圈和质量评估 */
+            snprintf(buf, sizeof(buf), "SELF_GPS:%.6f,%.6f,%.1f,%d,%.1f\n",
+                     gd.latitude, gd.longitude, gd.altitude, gd.satellites, gd.hdop);
         } else {
             snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,0\n");
         }
