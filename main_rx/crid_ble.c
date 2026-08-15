@@ -494,7 +494,6 @@ ble_on_sync(void)
     /* v2.0.8: 在 sync 回调中查找 characteristic handle。
      * NimBLE 在调用 sync_cb 之前已经完成了 ble_gatts_start()，
      * GATT 表已完全注册，ble_gatts_find_chr 可以安全使用。 */
-    int rc;
     rc = ble_gatts_find_chr(&gatt_svr_svc_nus_uuid.u,
                              &gatt_svr_chr_nus_tx_uuid.u,
                              NULL, &g_nus_tx_handle);
