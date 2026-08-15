@@ -1028,10 +1028,10 @@ async function toggleConnect(){
     addLog('info','[BLE] 正在连接...');
     bleServer=await bleDevice.gatt.connect();
     const svc=await bleServer.getPrimaryService(NUS_SERVICE);
-    txChar=await svc.getCharacteristic(NUS_TX);
-    rxChar=await svc.getCharacteristic(NUS_RX);
-    rxChar.addEventListener('characteristicvaluechanged',onBleData);
-    await rxChar.startNotifications();
+    txChar=await svc.getCharacteristic(NUS_TX);  // 0xFFE1 = NOTIFY (设备→手机)
+    rxChar=await svc.getCharacteristic(NUS_RX);  // 0xFFE2 = WRITE  (手机→设备)
+    txChar.addEventListener('characteristicvaluechanged',onBleData);
+    await txChar.startNotifications();
     isConnected=true; updateConnectionUI(true);
     addLog('success',`[BLE] 已连接: ${bleDevice.name}`);
     document.getElementById('deviceName').textContent=bleDevice.name||'RID-Scanner';
@@ -1088,9 +1088,9 @@ function updateConnectionUI(c){
   else{b.textContent='未连接';b.className='badge';btn.textContent='📡 连接 RID-Scanner';btn.className='btn-connect';document.getElementById('deviceName').textContent='--';document.getElementById('rssiValue').textContent='--';isPaired=false;}
 }
 function sendCmd(cmd){
-  if(!txChar){addLog('warn','[BLE] 发送失败: 通道未建立');return}
+  if(!rxChar){addLog('warn','[BLE] 发送失败: 通道未建立');return}
   const e=new TextEncoder();
-  txChar.writeValue(e.encode(cmd+'\n')).then(()=>{
+  rxChar.writeValue(e.encode(cmd+'\n')).then(()=>{
     addLog('info',`[发送] ${cmd}`);
   }).catch(err=>{
     addLog('error',`[BLE] 发送失败: ${err.message}`);

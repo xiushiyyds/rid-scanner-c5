@@ -200,14 +200,15 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ================================================================
- 信道轮转（简单轮转，无 TDD）
+ 信道轮转（三信道均衡轮巡 v2.0.3）
 
- ch6 长驻 3 秒，ch1/ch11 各 200ms。
+ ch1/ch6/ch11 各驻留 1 秒，均衡覆盖三个 RID 广播信道。
+ 旧策略 ch6 占 83% 时间导致 ch1/ch11 上的无人机漏检。
  WiFi sniffer 持续运行，BLE 扫描也持续运行。
- ESP32 共存硬件自动分时，不需要手动 pause/resume BLE。
+ ESP32 共存硬件自动分时。
  ================================================================ */
-static const uint8_t SCAN_CHANNELS[] = {6, 1, 6, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {3000, 200, 3000, 200};
+static const uint8_t SCAN_CHANNELS[] = {1, 6, 11};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 1000, 1000};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
@@ -222,7 +223,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 3s / ch1,ch11 200ms (BLE continuous)");
+    snprintf(msg, sizeof(msg), "Channel rotation: ch1/ch6/ch11 each 1s (balanced, BLE continuous)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
