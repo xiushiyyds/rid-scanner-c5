@@ -112,6 +112,9 @@ static volatile bool s_sim_armed = false;
 /* 侦测射频是否处于活动状态（BLE scan + WiFi sniffer） */
 static volatile bool s_detect_active = true;
 
+/* 模拟器配置（提前定义，供 detect/push_status 等函数引用） */
+static sim_config_t s_sim_config;
+
 static esp_err_t detect_stop(void) {
     if (!s_detect_active) return ESP_OK;
     ESP_LOGI("MODE", "Detect STOP: halting BLE scan + WiFi sniffer");
@@ -176,9 +179,6 @@ static void push_sim_status_to_phone(void) {
              mode_str);
     crid_ble_write_cb(buf, strlen(buf), NULL);
 }
-
-/* 模拟器配置 */
-static sim_config_t s_sim_config;
 
 /**
  * 切换到模拟发射模式（lcdfix28：侦测已由页面回调停掉，这里只负责 AP）
