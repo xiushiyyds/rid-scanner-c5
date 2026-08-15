@@ -126,15 +126,30 @@ static void process_adv_report(const uint8_t *addr, const uint8_t *data, uint8_t
         memcpy(pack_buf + 3, payload, 25);
         pack_data = pack_buf;
         pack_len = 28;
+        /* lcdfix21: 打印单条消息的 counter/type，便于诊断为什么 SN 看不到。
+         * ASTM BLE service data 里 counter 字节在 payload[-1]（即 ad_data[3]），
+         * 但 find_odid_service_data 已经跳过，这里通过 payload 指针反推。 */
+        uint8_t counter = payload[-1];  /* message_counter 紧邻 25B 消息前 */
+        uint8_t msg_type = payload[0] >> 4;
+        ESP_LOGI(TAG, "BLE ODID single: counter=%u msgType=%u rssi=%d ext=%d",
+                 counter, msg_type, rssi, is_extended);
     } else if (msg_len >= 28 && (payload[0] >> 4) == 0xF &&
                payload[1] == 25 && payload[2] >= 1 && payload[2] <= 10 &&
                msg_len >= 3 + payload[2] * 25) {
         /* 形态(b)：已经是 MessagePack，直接送解析器 */
         pack_data = payload;
         pack_len = 3 + payload[2] * 25;
+        ESP_LOGI(TAG, "BLE ODID pack: count=%u rssi=%d ext=%d",
+                 payload[2], rssi, is_extended);
     } else {
-        ESP_LOGD(TAG, "Unsupported BLE ODID len=%d first=%02x", msg_len,
-                 msg_len > 0 ? payload[0] : 0);
+        /* lcdfix21: 未知形态，打印 hex 头帮助诊断（之前是 ESP_LOGD，默认不输出） */
+        uint8_t show = msg_len < 24 ? msg_len : 24;
+        ESP_LOGW(TAG, "BLE ODID unsupported: msg_len=%u first=%02x head=%02x %02x %02x %02x %02x %02x rssi=%d",
+                 msg_len, msg_len > 0 ? payload[0] : 0,
+                 show > 0 ? payload[0] : 0, show > 1 ? payload[1] : 0,
+                 show > 2 ? payload[2] : 0, show > 3 ? payload[3] : 0,
+                 show > 4 ? payload[4] : 0, show > 5 ? payload[5] : 0,
+                 rssi);
         return;
     }
 

@@ -42,7 +42,7 @@
 #include "dji_droneid.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "1.9.9-lcdfix20"
+#define CRID_VERSION_STRING "1.9.9-lcdfix21"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__

@@ -266,7 +266,7 @@ gatt_svr_svc_nus_access(uint16_t conn_handle, uint16_t attr_handle,
 /* 广播超时回调：60秒无人连接则关闭 BLE */
 static void adv_timeout_cb(void *arg) {
     ESP_LOGI(TAG, "No BLE connection for 60s, restarting advertising");
-    ble_gap_adv_stop();
+    ble_gap_ext_adv_stop(NUS_ADV_INSTANCE);
     g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     if (g_adv_timer) {
         esp_timer_stop(g_adv_timer);
@@ -345,7 +345,13 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        ble_advertise_start();
+        /* lcdfix21: 连入成功 reason=0 不要重启广播，否则会和现有连接冲突。
+         * 60 秒超时（BLE_HS_ETIMEOUT）才是真正需要重启的情况。 */
+        ESP_LOGI(TAG, "ADV_COMPLETE reason=%d instance=%d",
+                 event->adv_complete.reason, event->adv_complete.instance);
+        if (event->adv_complete.reason != 0) {
+            ble_advertise_start();
+        }
         break;
 
     case BLE_GAP_EVENT_MTU:
@@ -372,64 +378,143 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 }
 
 /* ================================================================
- * 广播配置
+ * 广播配置 (lcdfix21)
+ *
+ * lcdfix21 关键修复：
+ *   sdkconfig 打开 CONFIG_BT_NIMBLE_EXT_ADV=y 后，旧版 ble_gap_adv_start()
+ *   在 NimBLE 中被编译成直接返回 BLE_HS_ENOTSUP(=8)，导致板子根本没在广播，
+ *   手机自然搜不到。必须改用 Extended Advertising 实例 API，并把 legacy_pdu=1
+ *   强制走 Legacy PDU（31 字节），保证手机/浏览器兼容性。
  * ================================================================ */
 
-static void
-ble_advertise_start(void)
+#define NUS_ADV_INSTANCE   0
+
+static int g_adv_configured = 0;
+
+static int ble_build_adv_data(uint8_t *out, size_t out_sz)
 {
-    struct ble_gap_adv_params adv_params;
     struct ble_hs_adv_fields fields;
     const char *name = "RID-Scanner";
 
     memset(&fields, 0, sizeof(fields));
-    memset(&adv_params, 0, sizeof(adv_params));
-
-    /* 广播：设备名 + 标志（UUID 放扫描应答） */
     fields.name = (uint8_t *)name;
     fields.name_len = (uint8_t)strlen(name);
     fields.name_is_complete = 1;
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    int rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "adv_set_fields failed (rc=%d)", rc);
-        return;
-    }
+    uint8_t buf[BLE_HS_ADV_MAX_SZ];
+    uint8_t buf_sz = 0;
+    int rc = ble_hs_adv_set_fields(&fields, buf, &buf_sz, sizeof(buf));
+    if (rc != 0) return rc;
+    if (buf_sz > out_sz) return BLE_HS_EMSGSIZE;
+    memcpy(out, buf, buf_sz);
+    return (int)buf_sz;
+}
 
-    /* 扫描应答：NUS 服务 UUID */
+static int ble_build_scan_rsp(uint8_t *out, size_t out_sz)
+{
     struct ble_hs_adv_fields rsp_fields;
     memset(&rsp_fields, 0, sizeof(rsp_fields));
     rsp_fields.uuids128 = (ble_uuid128_t *)&gatt_svr_svc_nus_uuid;
     rsp_fields.num_uuids128 = 1;
     rsp_fields.uuids128_is_complete = 1;
 
-    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "adv_rsp_set_fields failed (rc=%d)", rc);
+    uint8_t buf[BLE_HS_ADV_MAX_SZ];
+    uint8_t buf_sz = 0;
+    int rc = ble_hs_adv_set_fields(&rsp_fields, buf, &buf_sz, sizeof(buf));
+    if (rc != 0) return rc;
+    if (buf_sz > out_sz) return BLE_HS_EMSGSIZE;
+    memcpy(out, buf, buf_sz);
+    return (int)buf_sz;
+}
+
+static void
+ble_advertise_start(void)
+{
+    int rc;
+
+    /* 首次启动时配置 Extended Adv 实例 0，legacy_pdu=1 强制 Legacy PDU。
+     * 注意：ble_gap_ext_adv_configure 同一个 instance 只能调用一次，
+     * 断开重连时直接 start 即可，不能重复 configure（会返回 ENOMEM）。 */
+    if (!g_adv_configured) {
+        struct ble_gap_ext_adv_params ext_params;
+        memset(&ext_params, 0, sizeof(ext_params));
+        ext_params.connectable      = 1;
+        ext_params.scannable        = 1;
+        ext_params.legacy_pdu       = 1;   /* 走 Legacy 31 字节 PDU，手机兼容 */
+        ext_params.anonymous        = 0;
+        ext_params.include_tx_power = 0;
+        ext_params.directed         = 0;
+        ext_params.high_duty_directed = 0;
+        ext_params.itvl_min         = BLE_GAP_ADV_ITVL_MS(100);
+        ext_params.itvl_max         = BLE_GAP_ADV_ITVL_MS(150);
+        ext_params.channel_map      = 0;   /* 默认 37/38/39 全用 */
+        ext_params.own_addr_type    = BLE_OWN_ADDR_PUBLIC;
+        ext_params.filter_policy    = 0;
+        ext_params.primary_phy      = BLE_GAP_LE_PHY_1M;
+        ext_params.secondary_phy    = BLE_GAP_LE_PHY_1M;
+        ext_params.tx_power         = 127; /* 让控制器选默认功率 */
+        ext_params.sid              = 0;
+
+        int8_t selected_tx_power = 0;
+        rc = ble_gap_ext_adv_configure(NUS_ADV_INSTANCE, &ext_params,
+                                        &selected_tx_power,
+                                        ble_gap_event_cb, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_configure failed (rc=%d)", rc);
+            return;
+        }
+
+        /* 设置广播数据 */
+        uint8_t adv_buf[BLE_HS_ADV_MAX_SZ];
+        int adv_len = ble_build_adv_data(adv_buf, sizeof(adv_buf));
+        if (adv_len < 0) {
+            ESP_LOGE(TAG, "build adv data failed (%d)", adv_len);
+            return;
+        }
+        struct os_mbuf *adv_om = ble_hs_mbuf_from_flat(adv_buf, (uint16_t)adv_len);
+        if (!adv_om) {
+            ESP_LOGE(TAG, "adv mbuf alloc failed");
+            return;
+        }
+        rc = ble_gap_ext_adv_set_data(NUS_ADV_INSTANCE, adv_om);
+        os_mbuf_free_chain(adv_om);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_set_data failed (rc=%d)", rc);
+            return;
+        }
+
+        /* 设置扫描应答数据（NUS UUID） */
+        uint8_t rsp_buf[BLE_HS_ADV_MAX_SZ];
+        int rsp_len = ble_build_scan_rsp(rsp_buf, sizeof(rsp_buf));
+        if (rsp_len < 0) {
+            ESP_LOGE(TAG, "build rsp data failed (%d)", rsp_len);
+            return;
+        }
+        struct os_mbuf *rsp_om = ble_hs_mbuf_from_flat(rsp_buf, (uint16_t)rsp_len);
+        if (!rsp_om) {
+            ESP_LOGE(TAG, "rsp mbuf alloc failed");
+            return;
+        }
+        rc = ble_gap_ext_adv_rsp_set_data(NUS_ADV_INSTANCE, rsp_om);
+        os_mbuf_free_chain(rsp_om);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ext_adv_rsp_set_data failed (rc=%d)", rc);
+            return;
+        }
+
+        g_adv_configured = 1;
+        ESP_LOGI(TAG, "Extended adv instance %d configured (legacy_pdu=1, 100-150ms)",
+                 NUS_ADV_INSTANCE);
+    }
+
+    rc = ble_gap_ext_adv_start(NUS_ADV_INSTANCE, 0, 0);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGE(TAG, "ext_adv_start failed (rc=%d)", rc);
         return;
     }
 
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    /* lcdfix20：显式设置广播间隔。
-     * 同时开启 Extended scan（50%占空比）+ Legacy connectable adv 时，
-     * 若广播间隔用默认值（约 1.28s），手机可能要数秒才能扫到设备。
-     * 设为 100~150ms，手机基本 1~2 秒内可见。 */
-    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
-    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(150);
-    /* lcdfix19：保持 Legacy 可连接广播。
-     * 扫描侧需要 Extended adv 来收 BT5 Coded PHY，但外设 NUS 广播数据量小，
-     * Legacy 31 字节足够，且对手机/浏览器兼容性最好。 */
-
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                           &adv_params, ble_gap_event_cb, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "adv_start failed (rc=%d)", rc);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Advertising as '%s' with NUS UUID", name);
+    ESP_LOGI(TAG, "Advertising as 'RID-Scanner' with NUS UUID");
 
     /* 启动 60 秒超时定时器：无人连接则自动关闭广播 */
     if (g_adv_timer) {
