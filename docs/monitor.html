@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>RID 侦测监控 - ESP32-C5</title>
+<title>RID 侦测监控</title>
 <script src="https://webapi.amap.com/loader.js"></script>
 <style>
 :root {
@@ -40,8 +40,6 @@ body {
 .header h1 { font-size: 15px; font-weight: 600; }
 .badge { font-size: 11px; padding: 3px 8px; border-radius: 12px; background: var(--bg-input); color: var(--text-secondary); }
 .badge.connected { background: rgba(103,194,58,0.12); color: var(--green); }
-.badge.simulating { background: rgba(64,158,255,0.12); color: var(--accent); animation: pulse 1.5s infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 
 .map-section {
   position: relative; width: 100%; height: 320px;
@@ -104,24 +102,6 @@ body {
 .btn-connect.disconnect { background: var(--bg-input); color: var(--red); border: 1px solid rgba(245,108,108,0.3); }
 .device-info { display: flex; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
 .device-info span { color: var(--accent); }
-
-.slider-group { margin-bottom: 16px; }
-.slider-label { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.slider-label span { font-size: 13px; color: var(--text-primary); }
-.slider-value { font-size: 13px; font-weight: 600; color: var(--accent); min-width: 55px; text-align: right; }
-input[type="range"] { width:100%; height:6px; -webkit-appearance:none; background:var(--bg-input); border-radius:3px; outline:none; }
-input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:20px; height:20px; border-radius:50%; background:var(--accent); cursor:pointer; box-shadow:0 0 8px rgba(64,158,255,0.4); }
-
-.select-group { margin-bottom: 16px; }
-.select-group label { display: block; font-size: 13px; color: var(--text-primary); margin-bottom: 8px; }
-.select-group select { width:100%; padding:10px 14px; background:var(--bg-input); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-size:13px; outline:none; }
-
-.action-buttons { display: flex; gap: 10px; margin-top: 16px; }
-.btn-action { flex:1; padding:13px; border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; transition:all 0.2s; }
-.btn-start { background: linear-gradient(135deg, #67c23a, #529b2e); color: white; }
-.btn-stop { background: linear-gradient(135deg, #f56c6c, #c45656); color: white; }
-.btn-action:active { transform: scale(0.98); }
-.btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .info-item { background: var(--bg-input); padding: 10px 12px; border-radius: 8px; }
@@ -290,7 +270,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:20px;
 <body>
 <div class="container">
   <div class="header">
-    <h1>🛡️ RID 侦测监控</h1>
+    <h1>📡 RID 侦测监控</h1>
     <span id="statusBadge" class="badge">未连接</span>
   </div>
   <div id="alertBanner" class="alert-banner">⚠️ <span id="alertText">围栏告警</span></div>
@@ -320,36 +300,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:20px;
   <div id="tab-control" class="tab-content active">
     <div class="card">
       <h3>🔗 蓝牙连接</h3>
-      <button id="connectBtn" class="btn-connect" onclick="toggleConnect()">📡 连接 ESP32-C5</button>
+      <button id="connectBtn" class="btn-connect" onclick="toggleConnect()">📡 连接 RID-Scanner</button>
       <div class="device-info"><div>设备: <span id="deviceName">--</span></div><div>信号: <span id="rssiValue">--</span></div></div>
-    </div>
-    <div class="card">
-      <h3>⚙️ 模拟器参数</h3>
-      <div class="slider-group">
-        <div class="slider-label"><span>目标数量</span><span class="slider-value" id="targetCountValue">1</span></div>
-        <input type="range" id="targetCount" min="1" max="64" value="1" oninput="document.getElementById('targetCountValue').textContent=this.value">
-      </div>
-      <div class="slider-group">
-        <div class="slider-label"><span>发射功率</span><span class="slider-value" id="txPowerValue">5.00 dBm</span></div>
-        <input type="range" id="txPower" min="2" max="80" value="20" step="2" oninput="document.getElementById('txPowerValue').textContent=(this.value/4).toFixed(2)+' dBm'">
-      </div>
-      <div class="select-group">
-        <label>飞行模式</label>
-        <select id="flightMode">
-          <option value="circle">圆形巡游</option><option value="hover">定点悬停</option>
-          <option value="linear">直线飞行</option><option value="figure8">8字盘旋</option>
-        </select>
-      </div>
-      <div class="select-group">
-        <label>Wi-Fi 信道</label>
-        <select id="wifiChannel">
-          <option value="1">信道 1 (2412 MHz)</option><option value="6" selected>信道 6 (2437 MHz)</option><option value="11">信道 11 (2462 MHz)</option>
-        </select>
-      </div>
-      <div class="action-buttons">
-        <button id="startBtn" class="btn-action btn-start" onclick="startSim()" disabled>▶ 启动模拟</button>
-        <button id="stopBtn" class="btn-action btn-stop" onclick="stopSim()" disabled>⏹ 停止</button>
-      </div>
     </div>
   </div>
 
@@ -359,11 +311,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:20px;
       <h3>📊 运行状态</h3>
       <div class="info-grid">
         <div class="info-item"><div class="label">活跃目标</div><div class="value green" id="activeTargets">0</div></div>
-        <div class="info-item"><div class="label">轮询周期</div><div class="value blue" id="pollCycle">--</div></div>
+        <div class="info-item"><div class="label">固件版本</div><div class="value blue" id="firmwareVer">--</div></div>
         <div class="info-item"><div class="label">GPS 状态</div><div class="value orange" id="gpsStatus">未定位</div></div>
         <div class="info-item"><div class="label">运行时间</div><div class="value" id="uptime">00:00:00</div></div>
-        <div class="info-item"><div class="label">发射功率</div><div class="value blue" id="currentPower">--</div></div>
-        <div class="info-item"><div class="label">当前信道</div><div class="value" id="currentChannel">6</div></div>
+        <div class="info-item"><div class="label">当前信道</div><div class="value" id="currentChannel">--</div></div>
       </div>
     </div>
   </div>
@@ -376,7 +327,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:20px;
         <button class="btn-export" onclick="exportCSV()">📥 导出CSV</button>
       </h3>
       <div class="target-list" id="targetListContainer">
-        <div class="target-item" style="color:var(--text-secondary);justify-content:center">等待启动模拟...</div>
+        <div class="target-item" style="color:var(--text-secondary);justify-content:center">等待设备连接...</div>
       </div>
     </div>
   </div>
@@ -1059,8 +1010,7 @@ function clearAllDrones(){
 const NUS_SERVICE='6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_TX='6e400002-b5a3-f393-e0a9-e50e24dcca9e';
 const NUS_RX='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
-let bleDevice=null,bleServer=null,txChar=null,rxChar=null,isConnected=false,isSimulating=false,uptimeTimer=null,uptimeSeconds=0;
-let _demoTimer=null; // 演示模式定时器ID
+let bleDevice=null,bleServer=null,txChar=null,rxChar=null,isConnected=false,uptimeTimer=null,uptimeSeconds=0;
 let _bleBuffer=''; // ★ BLE数据包缓冲（处理分包/粘包）
 let _staleCleanTimer=null; // ★ 过期目标清理定时器
 let _connecting=false; // ★ 防连击标志
@@ -1080,16 +1030,15 @@ async function toggleConnect(){
     const svc=await bleServer.getPrimaryService(NUS_SERVICE);
     txChar=await svc.getCharacteristic(NUS_TX);
     rxChar=await svc.getCharacteristic(NUS_RX);
-    await rxChar.startNotifications();
     rxChar.addEventListener('characteristicvaluechanged',onBleData);
+    await rxChar.startNotifications();
     isConnected=true; updateConnectionUI(true);
     addLog('success',`[BLE] 已连接: ${bleDevice.name}`);
     document.getElementById('deviceName').textContent=bleDevice.name||'RID-Scanner';
-    // ★ 连接板子后：停止演示模式，清空虚拟目标
-    if(_demoTimer) { clearInterval(_demoTimer); _demoTimer=null; }
+    // ★ 连接板子后：清空残留目标，准备接收真实侦测数据
     clearAllDrones();
     if(map && centerMarker) { centerMarker.hide(); } // 隐藏默认位置，等板子GPS
-    addLog('info','[系统] 已切换为真机模式，等待板子GPS定位...');
+    addLog('info','[系统] 已切换为真机侦测模式，等待板子GPS定位...');
     // 连接后进入配对流程
     _connecting=false;
     showPairDialog();
@@ -1100,7 +1049,7 @@ async function toggleConnect(){
 }
 function disconnect(){if(bleDevice&&bleDevice.gatt.connected)bleDevice.gatt.disconnect();onDisconnected()}
 function onDisconnected(){
-  isConnected=false;isSimulating=false;updateConnectionUI(false);
+  isConnected=false;updateConnectionUI(false);
   addLog('warn','[BLE] 连接已断开');stopUptime();
   // 重置BLE缓冲和状态
   _bleBuffer='';
@@ -1109,16 +1058,27 @@ function onDisconnected(){
   // 关闭配对弹窗+清除超时计时器
   document.getElementById('pairOverlay').classList.remove('show');
   if(_pairTimer){clearTimeout(_pairTimer);_pairTimer=null}
-  // 重置GPS状态（下次连入重新居中）
-  if(centerMarker) centerMarker._selfGps=false;
+  // 清空目标列表为未连接空状态
+  clearAllDrones();
+  document.getElementById('targetListContainer').innerHTML='<div class="target-item" style="color:var(--text-secondary);justify-content:center">等待设备连接...</div>';
+  // 重置地图中心标记为默认位置
+  if(map && centerMarker){
+    const [dLng,dLat]=wgs84ToGcj02(121.6147, 38.9140);
+    centerMarker.setPosition([dLng,dLat]);
+    centerMarker.show();
+    centerMarker._selfGps=false;
+    map.setCenter([dLng,dLat]);
+  }
   document.getElementById('gpsStat').innerHTML='GPS: <span class="val">等待定位</span>';
   document.getElementById('gpsStatus').textContent='未定位';
   document.getElementById('gpsStatus').className='value orange';
+  document.getElementById('firmwareVer').textContent='--';
+  document.getElementById('currentChannel').textContent='--';
 }
 function updateConnectionUI(c){
   const b=document.getElementById('statusBadge'),btn=document.getElementById('connectBtn');
-  if(c){b.textContent='已连接(待配对)';b.className='badge connected';btn.textContent='🔌 断开连接';btn.className='btn-connect disconnect';document.getElementById('startBtn').disabled=true;/* 配对成功后才启用 */}
-  else{b.textContent='未连接';b.className='badge';btn.textContent='📡 连接 ESP32-C5';btn.className='btn-connect';document.getElementById('startBtn').disabled=true;document.getElementById('stopBtn').disabled=true;document.getElementById('deviceName').textContent='--';document.getElementById('rssiValue').textContent='--';isPaired=false;}
+  if(c){b.textContent='已连接(待配对)';b.className='badge connected';btn.textContent='🔌 断开连接';btn.className='btn-connect disconnect';}
+  else{b.textContent='未连接';b.className='badge';btn.textContent='📡 连接 RID-Scanner';btn.className='btn-connect';document.getElementById('deviceName').textContent='--';document.getElementById('rssiValue').textContent='--';isPaired=false;}
 }
 function sendCmd(cmd){
   if(!txChar){addLog('warn','[BLE] 发送失败: 通道未建立');return}
@@ -1145,7 +1105,7 @@ function onBleData(e){
 
 function parseResp(text){
   // 配对结果处理
-  if(text === 'PAIR_OK') { onPairResult(true); sendCmd('SIM_STATUS'); return; }
+  if(text === 'PAIR_OK') { onPairResult(true); return; }
   if(text === 'PAIR_FAIL') { onPairResult(false); return; }
 
   if(text.startsWith('STATUS:')){
@@ -1160,12 +1120,56 @@ function parseResp(text){
         document.getElementById('gpsStatus').textContent=v==='locked'?'3D锁定':'未定位';
         document.getElementById('gpsStatus').className='value '+(v==='locked'?'green':'orange');
       }
+      if(k==='channel') document.getElementById('currentChannel').textContent=v;
+      if(k==='version') document.getElementById('firmwareVer').textContent=v;
     });
   }
-  // JSON 格式数据 (uav_update / uav_discovery)
+  // JSON 格式数据
   if(text.startsWith('{')){
     try {
       const msg = JSON.parse(text);
+      // 启动横幅：解析固件版本、信道、最大目标数等
+      if(msg.evt === 'startup'){
+        if(msg.version) document.getElementById('firmwareVer').textContent=msg.version;
+        if(msg.channel !== undefined) document.getElementById('currentChannel').textContent=msg.channel;
+        if(msg.max_uavs !== undefined) addLog('info','[固件] v'+msg.version+' 已就绪，最大支持 '+msg.max_uavs+' 目标，信道 '+msg.channel);
+        else addLog('info','[固件] v'+(msg.version||'?')+' 已就绪');
+        return;
+      }
+      // 周期性状态报告：active_uavs 字段
+      if(msg.evt === 'status'){
+        if(msg.active_uavs !== undefined) document.getElementById('activeTargets').textContent=msg.active_uavs;
+        if(msg.rid_per_sec !== undefined){ /* 可扩展：显示侦测速率 */ }
+        return;
+      }
+      // 空域空闲通知
+      if(msg.evt === 'no_aircraft'){
+        document.getElementById('activeTargets').textContent = Object.keys(droneData).length;
+        document.getElementById('mapTargetCount').textContent = Object.keys(droneData).length;
+        document.getElementById('targetListCount').textContent = Object.keys(droneData).length;
+        return;
+      }
+      // uav_status：紧凑格式（顶层 lat/lon，非 location.latitude），同样更新位置
+      if(msg.evt === 'uav_status' && msg.lat !== undefined && msg.lon !== undefined){
+        const id = (msg.basic_id && msg.basic_id.uas_id) ? msg.basic_id.uas_id : (msg.id || ('UAV_'+(msg.ts||'')));
+        const relAlt = (msg.height !== undefined && msg.height !== null) ? msg.height : null;
+        const alt = (relAlt !== null && relAlt !== 0) ? relAlt : (msg.alt_baro || msg.alt_geo || 0);
+        const opLat = (msg.system && msg.system.operator_latitude) ? msg.system.operator_latitude : null;
+        const opLon = (msg.system && msg.system.operator_longitude) ? msg.system.operator_longitude : null;
+        const uaType = (msg.basic_id && msg.basic_id.ua_type) ? msg.basic_id.ua_type : '多旋翼';
+        updateDroneOnMap(id, msg.lat, msg.lon, alt,
+          (msg.speed_h||0).toFixed(1), (msg.direction||0).toFixed(0),
+          id, opLat, opLon, uaType);
+        if(droneData[id]){
+          droneData[id].alt_baro = msg.alt_baro || 0;
+          droneData[id].alt_geo = msg.alt_geo || 0;
+          droneData[id].height_ref = msg.height_ref || '';
+          droneData[id]._rel_alt = relAlt;
+          droneData[id]._has_rel = (relAlt !== null && relAlt !== 0);
+        }
+        updateTargetList(id);
+        return;
+      }
       if((msg.evt === 'uav_update' || msg.evt === 'uav_discovery') && msg.location){
         const loc = msg.location;
         const id = (msg.basic_id && msg.basic_id.uas_id) ? msg.basic_id.uas_id : ('UAV_'+(msg.ts||''));
@@ -1226,13 +1230,16 @@ function parseResp(text){
       updateTargetList(id);
     }
   }
-  // SELF_GPS:lat,lon,alt,sats — 板子自身GPS定位
+  // SELF_GPS:lat,lon,alt,sats — 板子自身GPS定位（每3秒一次）
+  // 未定位时固件发送 SELF_GPS:0,0,0,0
   if(text.startsWith('SELF_GPS:')){
     const p=text.substring(9).split(',');
     if(p.length>=2){
-      const lat=+p[0],lon=+p[1],alt=p[2]?+p[2]:0,sats=p[3]||'?';
-      const [gcjLng,gcjLat]=wgs84ToGcj02(lon,lat);
-      if(map && centerMarker){
+      const lat=+p[0],lon=+p[1],alt=p[2]?+p[2]:0,sats=parseInt(p[3])||0;
+      // 有效定位：纬度/经度非零且卫星数>0
+      const valid = (lat!==0 && lon!==0 && sats>0);
+      if(valid && map && centerMarker){
+        const [gcjLng,gcjLat]=wgs84ToGcj02(lon,lat);
         const isFirstGps = !centerMarker._selfGps;
         centerMarker._selfGps = true;
         // 移除旧标记重建（兼容 AMap 2.0）
@@ -1243,12 +1250,18 @@ function parseResp(text){
           offset: new AMap.Pixel(-9,-9)
         });
         map.add(centerMarker);
+        centerMarker.show();
         // 仅首次GPS定位时自动居中
         if(isFirstGps) map.setCenter([gcjLng,gcjLat]);
+        document.getElementById('gpsStat').innerHTML='GPS(WGS): <span class="val">'+lat.toFixed(4)+','+lon.toFixed(4)+' ('+sats+'星)</span>';
+        document.getElementById('gpsStatus').textContent=sats+'星定位';
+        document.getElementById('gpsStatus').className='value green';
+      } else if(!valid) {
+        // 未定位：不移动地图标记，只更新状态文字
+        document.getElementById('gpsStat').innerHTML='GPS: <span class="val" style="color:var(--orange)">搜索中 ('+sats+'星)</span>';
+        document.getElementById('gpsStatus').textContent=sats>0?sats+'星(未定位)':'未定位';
+        document.getElementById('gpsStatus').className='value orange';
       }
-      document.getElementById('gpsStat').innerHTML='GPS(WGS): <span class="val">'+lat.toFixed(4)+','+lon.toFixed(4)+' ('+sats+'星)</span>';
-      document.getElementById('gpsStatus').textContent=sats+'星定位';
-      document.getElementById('gpsStatus').className='value green';
     }
   }
   if(text.startsWith('ALERT:')){
@@ -1259,34 +1272,17 @@ function parseResp(text){
   }
 }
 
-// ============ 模拟器控制 ============
-function startSim(){
-  if(!isConnected||!isPaired)return;
-  const c=document.getElementById('targetCount').value,tp=document.getElementById('txPower').value,m=document.getElementById('flightMode').value,ch=document.getElementById('wifiChannel').value;
-  sendCmd(`SIM_CONFIG 38.9140 121.6147 ${m} ${ch} ${c} ${tp}`);
-  setTimeout(()=>{
-    sendCmd(`SIM_START ${c}`);isSimulating=true;
-    document.getElementById('startBtn').disabled=true;document.getElementById('stopBtn').disabled=false;
-    document.getElementById('statusBadge').textContent='模拟中';document.getElementById('statusBadge').className='badge simulating';
-    document.getElementById('activeTargets').textContent=c;
-    document.getElementById('pollCycle').textContent='~'+(c*20)+'ms';
-    document.getElementById('currentPower').textContent=(tp/4).toFixed(2)+' dBm';
-    document.getElementById('currentChannel').textContent=ch;
-    startUptime();addLog('success',`[模拟] 已启动 ${c} 个目标`);
-  },300);
-}
-function stopSim(){
-  if(!isConnected)return;
-  sendCmd('SIM_STOP');isSimulating=false;
-  document.getElementById('startBtn').disabled=false;document.getElementById('stopBtn').disabled=true;
-  document.getElementById('statusBadge').textContent='已连接';document.getElementById('statusBadge').className='badge connected';
-  document.getElementById('activeTargets').textContent='0';document.getElementById('mapTargetCount').textContent='0';document.getElementById('targetListCount').textContent='0';
-  stopUptime();clearAllDrones();addLog('info','[模拟] 已停止');
-}
-
+// ============ 目标列表渲染 ============
 function updateTargetList(id){
   const count=Object.keys(droneMarkers).length;
   document.getElementById('targetListCount').textContent=count;
+  if(count === 0){
+    if(_lastTargetCount !== 0){
+      document.getElementById('targetListContainer').innerHTML='<div class="target-item" style="color:var(--text-secondary);justify-content:center">正在扫描空域...</div>';
+      _lastTargetCount = 0;
+    }
+    return;
+  }
   // 目标数量没变则跳过重建DOM，减少闪烁
   if(count===_lastTargetCount) return;
   _lastTargetCount=count;
@@ -1420,69 +1416,16 @@ function onPairResult(ok) {
     const badge=document.getElementById('statusBadge');
     badge.textContent='已连接(已配对)';
     badge.className='badge connected';
-    // 配对成功后才启用控制按钮
-    document.getElementById('startBtn').disabled = false;
-    sendCmd('SIM_STATUS');
+    // 配对成功后开始设备运行计时，被动接收侦测数据
+    startUptime();
+    addLog('info','[系统] 侦测已启动，正在扫描空域...');
+    document.getElementById('targetListContainer').innerHTML='<div class="target-item" style="color:var(--text-secondary);justify-content:center">正在扫描空域...</div>';
   } else {
     isPaired = false;
     addLog('error', '[配对] 配对失败，配对码错误');
     alert('配对码错误，请检查设备屏幕上的数字');
     disconnect();
   }
-}
-
-// ============ 演示模式 ============
-function demoMode(){
-  isSimulating=true; addLog('warn','[演示] 未连接设备，显示模拟数据');
-  const bLat=38.914,bLon=121.614,opBaseLat=38.9120,opBaseLon=121.6130;
-  const snPool=[
-    '4TADLBS00A0101','4TADLKR00B0201','8UUXNXX00A0301','4TADCKR00C0401',
-    '89XHEAX00A0501','4TADMJR00D0601','3IXDJIA00A0701','4TADLMT00E0801',
-    '6AXFLYB00A0901','4TADLNE00F1001','8UUHGTS00B1101','4TADMVS00A1201'
-  ];
-  const typePool=Array(12).fill('多旋翼');
-  let targets=[];
-  for(let i=1;i<=12;i++){
-    const angle=(i/12)*Math.PI*2,r=0.002+Math.random()*0.003;
-    targets.push({
-      id:`UAV-${String(i).padStart(3,'0')}`,sn:snPool[(i-1)%snPool.length],ua_type:typePool[(i-1)%typePool.length],
-      lat:bLat+Math.sin(angle)*r,lon:bLon+Math.cos(angle)*r,
-      alt:40+Math.random()*80,speed:2+Math.random()*13,heading:((angle*180/PI)+90)%360,
-      op_lat:opBaseLat+(Math.random()-0.5)*0.0008,op_lon:opBaseLon+(Math.random()-0.5)*0.0008
-    });
-  }
-  function animate(){
-    targets.forEach(t=>{
-      t.lat+=(Math.random()-0.5)*0.00008;t.lon+=(Math.random()-0.5)*0.00008;
-      t.alt=Math.max(10,t.alt+(Math.random()-0.5)*0.3);
-      t.speed=Math.max(0.5,t.speed+(Math.random()-0.5)*0.5);
-      t.heading=(t.heading+(Math.random()-0.5)*5+360)%360;
-      updateDroneOnMap(t.id,t.lat,t.lon,t.alt.toFixed(1),t.speed.toFixed(1),t.heading.toFixed(0),t.sn,t.op_lat,t.op_lon,t.ua_type);
-    });
-    document.getElementById('mapTargetCount').textContent=targets.length;
-    document.getElementById('activeTargets').textContent=targets.length;
-    document.getElementById('targetListCount').textContent=targets.length;
-    // 更新目标列表
-    let html='';
-    targets.slice(0,30).forEach(t=>{
-      const d=droneData[t.id];
-      if(d){
-        const snS=t.sn.length>16?t.sn.substring(0,14)+'..':t.sn;
-        const bi=lookupSN(t.sn);
-        const brandLabel=bi.model?bi.brand+' '+bi.model:bi.brand;
-        html+=`<div class="target-item" onclick="showDetail('${t.id}')">
-          <div class="target-dot"></div>
-          <span class="target-id">${t.id}</span>
-          <span class="brand-tag ${bi.cls}" style="margin:0 6px;font-size:9px">${brandLabel}</span>
-          <span class="target-sn">${snS}</span>
-          <span class="target-pos">${d.gcj_lat.toFixed(4)},${d.gcj_lon.toFixed(4)} ${t.alt.toFixed(0)}m</span>
-        </div>`;
-      }
-    });
-    document.getElementById('targetListContainer').innerHTML=html;
-  }
-  animate();
-  _demoTimer = setInterval(animate,2000);
 }
 
 // ============ 过期目标自动清理 ============
@@ -1516,7 +1459,7 @@ function startStaleCleanTimer(){
   }, 10000); // 每10秒扫描一次
 }
 
-window.addEventListener('load',()=>{initMap();setTimeout(()=>{if(!isConnected)demoMode()},3000);startStaleCleanTimer()});
+window.addEventListener('load',()=>{initMap();startStaleCleanTimer()});
 </script>
 </body>
 </html>

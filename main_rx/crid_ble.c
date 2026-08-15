@@ -126,6 +126,8 @@ static void ble_host_task(void *param);
 static void ble_tx_task(void *param);
 static void ble_on_sync(void);
 static void ble_advertise_start(void);
+static void ble_delayed_welcome_task(void *arg);
+static void ble_delayed_scan_task(void *arg);
 
 /* ================================================================
  * GATT 服务定义
@@ -212,10 +214,9 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 g_pair_display_cb("RID-Scanner");
             }
 
-            const char *pair_ok = "PAIR_OK\n";
-            crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
-            const char *status = "STATUS:targets:0,gps:searching\n";
-            crid_ble_write_cb(status, strlen(status), NULL);
+            /* 延迟 800ms 发送 PAIR_OK/STATUS，等手机完成 GATT discovery + CCCD 订阅。
+             * 立即发送会因为客户端尚未 enable notification 而被丢弃，导致手机卡在"待连接"。 */
+            xTaskCreate(ble_delayed_welcome_task, "ble_welcome", 2048, NULL, 4, NULL);
 
             /* 宽松连接间隔 30~50ms，给 BLE 扫描留时间 */
             struct ble_gap_upd_params params = {
@@ -228,7 +229,7 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             };
             ble_gap_update_params(event->connect.conn_handle, &params);
 
-            crid_ble_delayed_scan_restart(1500);
+            crid_ble_delayed_scan_restart(5000);
         } else {
             g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             ESP_LOGE(TAG, "Connect failed (status=%d)", event->connect.status);
@@ -371,6 +372,25 @@ ble_advertise_start(void)
     if (esp_timer_create(&tmr, &g_adv_timer) == ESP_OK) {
         esp_timer_start_once(g_adv_timer, ADV_TIMEOUT_US);
     }
+}
+
+/* ================================================================
+ * 延迟发送欢迎消息（PAIR_OK + STATUS），等手机完成 GATT/CCCD
+ * ================================================================ */
+static void ble_delayed_welcome_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(800));
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "Sending delayed welcome (PAIR_OK + STATUS)");
+    const char *pair_ok = "PAIR_OK\n";
+    crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    const char *status = "STATUS:targets:0,gps:searching\n";
+    crid_ble_write_cb(status, strlen(status), NULL);
+    vTaskDelete(NULL);
 }
 
 /* ================================================================

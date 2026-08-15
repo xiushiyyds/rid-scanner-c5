@@ -182,8 +182,8 @@ static int start_scan(void) {
     struct ble_gap_ext_disc_params uncoded_params = {0};
     struct ble_gap_ext_disc_params coded_params = {0};
 
-    uncoded_params.itvl = 200;    /* 200 × 0.625ms = 125ms */
-    uncoded_params.window = 20;   /* 20 × 0.625ms = 12.5ms (10% duty) */
+    uncoded_params.itvl = 200;    /* 160 × 0.625ms = 100ms */
+    uncoded_params.window = 20;   /* 80 × 0.625ms = 50ms (50% duty) */
     uncoded_params.passive = 1;
 
     coded_params.itvl = 200;
@@ -209,8 +209,8 @@ static int start_scan(void) {
 
     /* Legacy 扫描：10% 占空比，给 WiFi sniffer 留空口 */
     memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.itvl = 200;           /* 200 × 0.625ms = 125ms */
-    disc_params.window = 20;          /* 20 × 0.625ms = 12.5ms (10% duty) */
+    disc_params.itvl = 160;           /* 160 × 0.625ms = 100ms */
+    disc_params.window = 80;          /* 80 × 0.625ms = 50ms (50% duty) */
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
     disc_params.passive = 1;
@@ -224,7 +224,7 @@ static int start_scan(void) {
     }
 
     s_ext_adv_type = 0;
-    ESP_LOGI(TAG, "BLE Legacy scan started (10%% duty, passive)");
+    ESP_LOGI(TAG, "BLE Legacy scan started (50%% duty, passive)");
     return 0;
 }
 
