@@ -95,11 +95,24 @@ esp_err_t sim_wifi_init(uint8_t channel, const char *ssid, int8_t tx_power) {
     /* 再次确认功率设置 */
     esp_wifi_set_max_tx_power(tx_power);
 
-    s_current_channel = channel;
+    /* 强制锁定信道（AP 启动后再次确认，防止信道漂移） */
+    ret = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_channel failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    /* lcdfix16: 移除这里的 esp_wifi_set_promiscuous(true)。
-     * AP 模式下不需要 promiscuous，之前开了也没注册回调，
-     * 反而可能让控制器状态异常。80211_tx 帧在 AP 模式下直接发送。 */
+    /* lcdfix28 修复：AP 模式下用 esp_wifi_80211_tx 发送自定义源 MAC 的原始 RID
+     * Beacon，必须开启 promiscuous 注入模式。否则控制器按普通 AP 帧处理，伪造的
+     * Vendor IE 内容发不出去——肩灯能收到射频能量报警，但解析不到无人机信息。
+     * （lcdfix16 误删此项，理由是"没注册回调"，但 promiscuous 注入不需要回调。） */
+    ret = esp_wifi_set_promiscuous(true);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_promiscuous failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_current_channel = channel;
 
     ESP_LOGI(TAG, "Wi-Fi AP init OK: ch=%u, SSID=%s, tx_power=%d (0.25dBm) = %.1f dBm",
              channel, ap_config.ap.ssid, tx_power, tx_power * 0.25f);

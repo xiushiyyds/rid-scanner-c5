@@ -298,10 +298,13 @@ static int start_scan(void) {
     ESP_LOGI(TAG, "BLE_EXT_ADV not enabled, using legacy scan");
 #endif
 
-    /* 回退到 Legacy 扫描 */
+    /* 回退到 Legacy 扫描。
+     * lcdfix29: 占空比从 50%(window48/itvl96) 降到 10%(window48/itvl480=300ms)，
+     * 给同射频的 WiFi sniffer 让出空口，提升 WiFi RID Beacon 接收率。
+     * BLE RID 设备通常每 100~1000ms 广播一次，300ms 窗口仍能稳定捕获。 */
     memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.itvl = 96;            /* 96 × 0.625ms = 60ms */
-    disc_params.window = 48;          /* 48 × 0.625ms = 30ms */
+    disc_params.itvl = 480;           /* 480 × 0.625ms = 300ms */
+    disc_params.window = 48;          /* 48 × 0.625ms = 30ms (10% 占空比) */
     disc_params.filter_policy = 0;    /* 接收所有 */
     disc_params.limited = 0;
     disc_params.passive = 1;          /* passive scan，不发 scan request */
