@@ -144,6 +144,8 @@ static void ble_connect_task(void *arg);
 static void ble_delayed_scan_task(void *arg);
 static void ble_send_welcome_task(void *arg);  /* v2.1.1: SUBSCRIBE 后发 PAIR_OK */
 static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
+static void rf_arbiter_start(void);  /* v2.1.7 */
+static void rf_arbiter_stop(void);   /* v2.1.7 */
 
 /* ================================================================
  * GATT 服务定义
