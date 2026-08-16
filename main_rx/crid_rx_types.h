@@ -390,6 +390,12 @@ typedef struct {
     // 地理围栏告警状态
     uint8_t  alert_level;       // alert_level_t: 0=无告警, 1=超高, 2=禁飞区, 3=机场净空区, 4=管制空域
     char     alert_zone[32];    // 触发告警的区域名称
+
+    // RSSI 趋势（滑动窗口，用于判断接近/远离）
+    int8_t   rssi_hist[6];      // 最近6次RSSI采样
+    uint8_t  rssi_hist_cnt;     // 已填充采样数(0-6)
+    uint8_t  rssi_hist_idx;     // 下一个写入位置(环形)
+    int8_t   rssi_trend;        // -1=远离, 0=平稳, 1=接近
 } uav_track_t;
 
 /* ================================================================
