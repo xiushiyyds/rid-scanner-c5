@@ -27,6 +27,7 @@
 
 #include "crid_ble.h"
 #include "crid_ble_scan.h"
+#include "crid_sniffer.h"
 
 static const char *TAG = "RID_BLE";
 
@@ -257,6 +258,8 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         g_subscribed = false;
         g_pair_ok_sent = false;
         crid_ble_reset_pair();
+        /* v2.1.7: 停止 RF 分时仲裁，恢复 WiFi 全速接收 */
+        rf_arbiter_stop();
         /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
          * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
         portENTER_CRITICAL(&g_ble_line_mux);
@@ -460,13 +463,60 @@ static void ble_send_welcome_task(void *arg) {
  *     固定 500ms 延时会在通知通道就绪前丢数据
  *   - 占空比切换让控制器在扫描间隙处理 service discovery
  * ================================================================ */
+/* ================================================================
+ * v2.1.7: BLE GATT 连接期间的 RF 分时任务
+ *
+ * ESP-IDF 官方共存文档：WiFi Sniffer RX + BLE Connected = C1 级
+ * （"supported but performance unstable"）。sniffer 持续接收不释放
+ * RF，PTA 无法给 BLE TX 调度时隙，导致 notification 数据包在
+ * 控制器队列中饿死（host 返回成功但空中未发出）。
+ *
+ * 解决方案：BLE 连接期间每 30ms 暂停 promiscuous 5ms，让控制器在
+ * BLE connection event 窗口中把排队的 notification 发出去。
+ * WiFi 侦测覆盖 83%（25/30ms），BLE 连接事件间隔 30~50ms，
+ * 每个间隔至少有一个 5ms 窗口可供 TX。
+ * ================================================================ */
+static TaskHandle_t s_rf_arbiter_handle = NULL;
+static volatile bool s_rf_arbiter_run = false;
+
+static void ble_rf_arbiter_task(void *arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "RF arbiter started (WiFi pause 5ms / 30ms cycle)");
+    while (s_rf_arbiter_run) {
+        /* 25ms WiFi 正常接收 */
+        for (int i = 0; i < 25 && s_rf_arbiter_run; i++) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (!s_rf_arbiter_run) break;
+        /* 5ms 让给 BLE TX */
+        crid_sniffer_pause(true);
+        vTaskDelay(pdMS_TO_TICKS(5));
+        crid_sniffer_pause(false);
+    }
+    /* 确保恢复 */
+    crid_sniffer_pause(false);
+    ESP_LOGI(TAG, "RF arbiter stopped");
+    s_rf_arbiter_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void rf_arbiter_start(void) {
+    if (s_rf_arbiter_handle) return;
+    s_rf_arbiter_run = true;
+    xTaskCreate(ble_rf_arbiter_task, "rf_arbiter", 2048, NULL, 6,
+                &s_rf_arbiter_handle);
+}
+
+static void rf_arbiter_stop(void) {
+    if (!s_rf_arbiter_handle) return;
+    s_rf_arbiter_run = false;
+    /* 等待任务自行退出并恢复 WiFi */
+}
+
 static void ble_connect_task(void *arg) {
     (void)arg;
 
-    /* v2.1.4: 连接期间完全停止 BLE RID 扫描，确保 GATT 通知可靠送达。
-     * C5 控制器在 scan + GATT 连接并行时 notify 数据丢失（host 层返回0，
-     * 但空中未发出），这是手机收不到数据的根因。
-     * WiFi sniffer 继续运行，BLE RID 广播在连接期间暂时不扫描。*/
+    /* v2.1.4: 连接期间完全停止 BLE RID 扫描。 */
     crid_ble_scan_stop();
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -477,6 +527,9 @@ static void ble_connect_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "BLE scan STOPPED for GATT connection (notify reliability)");
+
+    /* v2.1.7: 启动 RF 分时仲裁，给 BLE TX 让出射频窗口 */
+    rf_arbiter_start();
 
     vTaskDelete(NULL);
 }

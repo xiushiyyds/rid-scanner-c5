@@ -406,3 +406,18 @@ void crid_sniffer_start_channel_hold(void) {
 void crid_sniffer_stop_channel_hold(void) {
     s_hold_should_stop = true;
 }
+
+/* v2.1.7: BLE GATT 连接期间暂停/恢复 promiscuous，给 BLE TX 让出射频。
+ * Sniffer 模式（C1 共存等级）持续占用 RF 接收，PTA 无法调度 BLE TX。
+ * 每 ~50ms 暂停 5ms 足以让 BLE controller 在 connection event 中
+ * 把排队的 notification 发出去。*/
+static volatile bool s_sniffer_paused = false;
+void crid_sniffer_pause(bool pause) {
+    if (pause && !s_sniffer_paused) {
+        s_sniffer_paused = true;
+        esp_wifi_set_promiscuous(false);
+    } else if (!pause && s_sniffer_paused) {
+        s_sniffer_paused = false;
+        esp_wifi_set_promiscuous(true);
+    }
+}

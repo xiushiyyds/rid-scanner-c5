@@ -52,3 +52,6 @@ uint8_t crid_sniffer_get_current_channel(void);
 #endif
 
 #endif // CRID_SNIFFER_H
+
+/** 暂停/恢复 WiFi promiscuous 接收（BLE GATT 连接期间让射频给 BLE TX） */
+void crid_sniffer_pause(bool pause);
