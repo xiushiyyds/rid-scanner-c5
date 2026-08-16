@@ -816,7 +816,7 @@ static void render_detail(void)
     char buf[48];
 
     /* 标题：型号 + (n/N) */
-    char title_buf[64];
+    char title_buf[96];
     int total_active = 0;
     xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
     for (int i = 0; i < s_max_uavs; i++)
