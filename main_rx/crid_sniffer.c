@@ -233,7 +233,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1.5s / ch1,ch11 250ms (75% ch6)");
+    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1.5s / ch1,ch11 250ms (75%% ch6)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
