@@ -30,8 +30,9 @@
 static json_write_cb_t g_data_write_cb = NULL;  // 数据流回调（UAV 数据、状态统计）
 static void *g_data_write_ctx = NULL;            // 回调上下文
 
-// 数据流：输出到 stdout + 可选回调
+// 数据流：输出到 stdout（带 DATA: 前缀，方便 Web Serial 过滤日志）+ 可选回调
 static inline void data_write(const char *str, size_t len) {
+    fwrite("DATA:", 1, 5, stdout);
     fwrite(str, 1, len, stdout);
     if (g_data_write_cb) {
         g_data_write_cb(str, len, g_data_write_ctx);

@@ -144,8 +144,6 @@ static void ble_connect_task(void *arg);
 static void ble_delayed_scan_task(void *arg);
 static void ble_send_welcome_task(void *arg);  /* v2.1.1: SUBSCRIBE 后发 PAIR_OK */
 static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
-static void rf_arbiter_start(void);  /* v2.1.7 */
-static void rf_arbiter_stop(void);   /* v2.1.7 */
 
 /* ================================================================
  * GATT 服务定义
@@ -260,8 +258,6 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         g_subscribed = false;
         g_pair_ok_sent = false;
         crid_ble_reset_pair();
-        /* v2.1.7: 停止 RF 分时仲裁，恢复 WiFi 全速接收 */
-        rf_arbiter_stop();
         /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
          * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
         portENTER_CRITICAL(&g_ble_line_mux);
@@ -457,64 +453,8 @@ static void ble_send_welcome_task(void *arg) {
 }
 
 /* ================================================================
- * 连接建立后：只负责切换扫描占空比到 LOW (40%)。
- *
- * v2.1.1 关键变化：
- *   - 不再固定延时发 PAIR_OK，改由 SUBSCRIBE 事件触发
- *   - 手机 CCCD 写入可能需要 200ms~2s（取决于手机性能），
- *     固定 500ms 延时会在通知通道就绪前丢数据
- *   - 占空比切换让控制器在扫描间隙处理 service discovery
+ * 连接建立后：停止 BLE RID 扫描（GATT 连接期间）
  * ================================================================ */
-/* ================================================================
- * v2.1.7: BLE GATT 连接期间的 RF 分时任务
- *
- * ESP-IDF 官方共存文档：WiFi Sniffer RX + BLE Connected = C1 级
- * （"supported but performance unstable"）。sniffer 持续接收不释放
- * RF，PTA 无法给 BLE TX 调度时隙，导致 notification 数据包在
- * 控制器队列中饿死（host 返回成功但空中未发出）。
- *
- * 解决方案：BLE 连接期间每 30ms 暂停 promiscuous 5ms，让控制器在
- * BLE connection event 窗口中把排队的 notification 发出去。
- * WiFi 侦测覆盖 83%（25/30ms），BLE 连接事件间隔 30~50ms，
- * 每个间隔至少有一个 5ms 窗口可供 TX。
- * ================================================================ */
-static TaskHandle_t s_rf_arbiter_handle = NULL;
-static volatile bool s_rf_arbiter_run = false;
-
-static void ble_rf_arbiter_task(void *arg) {
-    (void)arg;
-    ESP_LOGI(TAG, "RF arbiter started (WiFi pause 5ms / 30ms cycle)");
-    while (s_rf_arbiter_run) {
-        /* 25ms WiFi 正常接收 */
-        for (int i = 0; i < 25 && s_rf_arbiter_run; i++) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-        if (!s_rf_arbiter_run) break;
-        /* 5ms 让给 BLE TX */
-        crid_sniffer_pause(true);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        crid_sniffer_pause(false);
-    }
-    /* 确保恢复 */
-    crid_sniffer_pause(false);
-    ESP_LOGI(TAG, "RF arbiter stopped");
-    s_rf_arbiter_handle = NULL;
-    vTaskDelete(NULL);
-}
-
-static void rf_arbiter_start(void) {
-    if (s_rf_arbiter_handle) return;
-    s_rf_arbiter_run = true;
-    xTaskCreate(ble_rf_arbiter_task, "rf_arbiter", 2048, NULL, 6,
-                &s_rf_arbiter_handle);
-}
-
-static void rf_arbiter_stop(void) {
-    if (!s_rf_arbiter_handle) return;
-    s_rf_arbiter_run = false;
-    /* 等待任务自行退出并恢复 WiFi */
-}
-
 static void ble_connect_task(void *arg) {
     (void)arg;
 
@@ -528,10 +468,7 @@ static void ble_connect_task(void *arg) {
         return;
     }
 
-    ESP_LOGI(TAG, "BLE scan STOPPED for GATT connection (notify reliability)");
-
-    /* v2.1.7: 启动 RF 分时仲裁，给 BLE TX 让出射频窗口 */
-    rf_arbiter_start();
+    ESP_LOGI(TAG, "BLE scan STOPPED for GATT connection");
 
     vTaskDelete(NULL);
 }
