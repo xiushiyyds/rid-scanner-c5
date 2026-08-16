@@ -608,6 +608,10 @@ ble_tx_task(void *param)
             free(buf);
             continue;
         }
+        if (!g_subscribed) {
+            free(buf);
+            continue;
+        }
 
         uint16_t mtu = ble_att_mtu(g_nus_conn_handle);
         uint16_t chunk_size = (mtu >= 6) ? (mtu - 3) : 20;
@@ -620,7 +624,7 @@ ble_tx_task(void *param)
 
             struct os_mbuf *om = ble_hs_mbuf_from_flat(buf + offset, send_len);
             if (om) {
-                int rc = ble_gattc_notify_custom(g_nus_conn_handle,
+                int rc = ble_gatts_notify_custom(g_nus_conn_handle,
                                                   g_nus_tx_handle, om);
                 if (rc != 0) {
                     notify_errors++;
