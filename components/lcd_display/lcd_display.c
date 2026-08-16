@@ -932,9 +932,29 @@ static void render_detail(void)
         (s_tracker[idx].dji_serial[0] ? s_tracker[idx].dji_serial : NULL) :
         (s_tracker[idx].basic_id.uas_id[0] ? s_tracker[idx].basic_id.uas_id : NULL);
     if (sn_text) {
-        fb_text(4, y, "SN", C_GREEN);
-        fb_text_trunc(30, y, sn_text, C_LTGRAY, LCD_WIDTH - 34);
-        y += FONT_LINE_H + 1;
+        int sn_len = (int)strlen(sn_text);
+        /* 一行能放 17 个 ASCII 字符（(170-30)/8）。SN 超长时拆两行完整显示 */
+        if (sn_len <= 17) {
+            fb_text(4, y, "SN", C_GREEN);
+            fb_text(30, y, sn_text, C_LTGRAY);
+            y += FONT_LINE_H + 1;
+        } else {
+            char sn_line[24];
+            fb_text(4, y, "SN", C_GREEN);
+            int first = sn_len > 17 ? 17 : sn_len;
+            memcpy(sn_line, sn_text, first);
+            sn_line[first] = 0;
+            fb_text(30, y, sn_line, C_LTGRAY);
+            y += FONT_LINE_H + 1;
+            int rest = sn_len - 17;
+            if (rest > 0) {
+                if (rest > 20) rest = 20;
+                memcpy(sn_line, sn_text + 17, rest);
+                sn_line[rest] = 0;
+                fb_text(30, y, sn_line, C_LTGRAY);
+                y += FONT_LINE_H + 1;
+            }
+        }
     }
 
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
