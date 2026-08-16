@@ -3,7 +3,7 @@
  *
  * 使用独立的 evlog 分区（2MB, subtype 0x80），裸 flash 读写。
  * 环形缓冲：head 指向下一个写入位置，count 记录有效条数。
- * 每次写入单条 64 字节记录，通过 esp_partition_write 追加。
+ * 每次写入单条 128 字节记录，通过 esp_partition_write 追加。
  * 擦除按 4KB sector 进行，只有当 head 越过 sector 边界时才擦除下一个 sector。
  */
 #include <string.h>
@@ -36,29 +36,32 @@ static uint32_t total_data_records(void) {
 }
 
 static void load_meta(void) {
-    /* 扫描数据区，统计有效记录并定位 head */
+    /* 扫描数据区，按 sector 批量读取（避免 16K 次单条读取拖慢启动） */
     uint32_t total = total_data_records();
     s_count = 0;
     s_head = 0;
 
-    /* 快速扫描：找到最后一条 magic 有效的记录 */
     uint32_t last_valid = UINT32_MAX;
-    for (uint32_t i = 0; i < total; i++) {
-        evlog_record_t rec;
+    uint8_t sector_buf[SECTOR_SIZE];
+    uint32_t data_sectors = (PART_SIZE_BYTES - SECTOR_SIZE) / SECTOR_SIZE;
+    uint32_t rec_idx = 0;
+
+    for (uint32_t s = 0; s < data_sectors && rec_idx < total; s++) {
         esp_err_t err = esp_partition_read(s_part,
-            (size_t)i * EVLOG_RECORD_SIZE, &rec, EVLOG_RECORD_SIZE);
-        if (err == ESP_OK && rec.magic == EVLOG_MAGIC) {
-            last_valid = i;
-            s_count++;
+            s * SECTOR_SIZE, sector_buf, SECTOR_SIZE);
+        if (err != ESP_OK) continue;
+        for (int r = 0; r < RECS_PER_SECTOR && rec_idx < total; r++, rec_idx++) {
+            uint16_t magic;
+            memcpy(&magic, sector_buf + r * EVLOG_RECORD_SIZE, sizeof(magic));
+            if (magic == EVLOG_MAGIC) {
+                last_valid = rec_idx;
+                s_count++;
+            }
         }
     }
 
     if (last_valid != UINT32_MAX) {
         s_head = (last_valid + 1) % total;
-        /* 检查是否有环绕（记录数 == total 说明满了） */
-        if (s_count < total) {
-            /* 未满，count 就是扫描到的数量 */
-        }
     } else {
         s_head = 0;
         s_count = 0;
@@ -215,7 +218,7 @@ int evlog_read(uint32_t index, evlog_record_t *rec) {
     uint32_t total = total_data_records();
     if (index >= s_count || index >= total) return ESP_ERR_NOT_FOUND;
 
-    /* ring buffer: 最旧记录在 head - count */
+    /* ring buffer: 最旧记录位置——未满时从 0 开始，满了从 head 开始 */
     uint32_t pos;
     if (s_count < total) {
         pos = index;

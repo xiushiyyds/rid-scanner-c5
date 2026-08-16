@@ -166,8 +166,6 @@ static void parser_task(void *pvParameter) {
             uav->last_channel = msg.channel;
             crid_tracker_update_rssi(uav, msg.rssi);
 
-            /* 证据留存：每 5 秒记录一条 */
-            if (uav->msg_count % 10 == 0) evlog_write(uav);
             uav->is_dji = true;
             uav->protocol = RID_PROTOCOL_UNKNOWN;
 
@@ -274,6 +272,13 @@ static void parser_task(void *pvParameter) {
                 }
             }
 
+            /* 证据留存：首次发现立即记录，之后每 10 条记录一次（解析+合并完成后写） */
+            if (was_new && (uav->dji_serial[0] || uav->location.valid)) {
+                evlog_write(uav);
+            } else if (uav->msg_count % 10 == 0 && (uav->dji_serial[0] || uav->location.valid)) {
+                evlog_write(uav);
+            }
+
             xSemaphoreGive(mutex);
 
             /* v2.0.8: DJI 路径同样立即发首次，后续 1 秒节流 */
@@ -314,9 +319,6 @@ static void parser_task(void *pvParameter) {
         uav->last_rssi = msg.rssi;
         uav->last_channel = msg.channel;
         crid_tracker_update_rssi(uav, msg.rssi);
-
-        /* 证据留存：每 10 条消息记录一次（约 5 秒） */
-        if (uav->msg_count % 10 == 0) evlog_write(uav);
 
         uav->oui[0] = msg.oui[0];
         uav->oui[1] = msg.oui[1];
@@ -401,6 +403,13 @@ static void parser_task(void *pvParameter) {
                 uav->alert_level = 0;
                 uav->alert_zone[0] = '\0';
             }
+        }
+
+        /* 证据留存：首次发现立即记录，之后每 10 条记录一次（解析+合并完成后写） */
+        if (was_new && (uav->basic_id.valid || uav->location.valid)) {
+            evlog_write(uav);
+        } else if (uav->msg_count % 10 == 0 && (uav->basic_id.valid || uav->location.valid)) {
+            evlog_write(uav);
         }
 
         xSemaphoreGive(mutex);
