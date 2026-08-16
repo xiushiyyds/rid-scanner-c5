@@ -20,7 +20,7 @@ idf_component_register(
         "${MAIN_RX_DIR}/dji_droneid.c"
         "${MAIN_RX_DIR}/evlog.c"
     INCLUDE_DIRS "${MAIN_RX_DIR}"
-    PRIV_REQUIRES opendroneid bt lcd_display crid_common
+    PRIV_REQUIRES opendroneid bt lcd_display crid_common crid_simulator
     REQUIRES nvs_flash esp_wifi esp_netif esp_event log
              esp_driver_uart esp_hw_support esp_system esp_timer
              spi_flash esp_driver_gpio

@@ -54,9 +54,10 @@
 #include "driver/gpio.h"
 #include "dji_droneid.h"
 #include "evlog.h"
+#include "sim_core.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.2.0-detector"
+#define CRID_VERSION_STRING "2.5.0-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -540,6 +541,72 @@ static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_ou
  *  14. startup banner
  * ================================================================ */
 void app_main(void) {
+    // 0. 早期 LCD 硬件初始化（framebuffer + SPI + 背光），
+    //    用于显示开机模式选择菜单。WiFi/BLE 尚未启动，内部 SRAM 充足。
+    if (lcd_display_early_init() != 0) {
+        ESP_LOGE("RID_MAIN", "LCD early init failed (non-fatal)");
+    }
+
+    // 0.1 NVS 初始化（模拟器配置需要 NVS）
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE("RID_MAIN", "NVS init failed: %s", esp_err_to_name(ret));
+    }
+    esp_netif_init();
+    esp_event_loop_create_default();
+
+    // 0.2 开机模式选择菜单（6秒超时默认侦测）
+    boot_mode_t boot_mode = lcd_boot_menu(6000);
+    ESP_LOGI("RID_MAIN", "Boot mode selected: %d (%s)",
+             (int)boot_mode,
+             boot_mode == BOOT_MODE_SIMULATOR ? "SIMULATOR" : "DETECTOR");
+
+    // ================================================================
+    // 模拟发射模式
+    // ================================================================
+    if (boot_mode == BOOT_MODE_SIMULATOR) {
+        // 完整 LCD 初始化（跳过硬件部分，已 early_init）
+        if (lcd_display_init() == 0) {
+            json_debug("RID_MAIN", "LCD ready (simulator mode)");
+        }
+
+        // 初始化模拟器
+        sim_init();
+
+        sim_config_t sim_cfg;
+        sim_get_default_config(&sim_cfg);
+        sim_cfg.target_count = 64;
+        sim_cfg.channel = 6;
+        sim_cfg.tx_power = 20;
+        strncpy(sim_cfg.uas_id, "SIM-C5-", sizeof(sim_cfg.uas_id) - 1);
+
+        ESP_LOGI("RID_MAIN", "Starting simulator: %d targets on ch%d",
+                 sim_cfg.target_count, sim_cfg.channel);
+
+        ret = sim_start(&sim_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE("RID_MAIN", "sim_start failed: %s", esp_err_to_name(ret));
+            return;
+        }
+
+        // 模拟模式主循环：定期打印发射统计
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            ESP_LOGI("RID_MAIN", "SIM running: tx_count=%lu, state=%d",
+                     (unsigned long)sim_get_tx_count(),
+                     (int)sim_get_state());
+        }
+        /* 不会到达这里 */
+    }
+
+    // ================================================================
+    // 侦测模式（原有启动流程）
+    // ================================================================
+
     // 1. UART 数据端口 + JSON 回调
     uart_data_port_init();
     json_set_data_write_cb(uart_data_write_cb, NULL);
@@ -562,18 +629,8 @@ void app_main(void) {
     // 3.5 证据日志
     evlog_init();
 
-    // 4. NVS + netif + event loop
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        ret = nvs_flash_init();
-    }
-    if (ret != ESP_OK) {
-        json_error("RID_MAIN", "NVS init failed");
-        return;
-    }
-    esp_netif_init();
-    esp_event_loop_create_default();
+    // 4. NVS 已在开机菜单前初始化，此处跳过重复初始化
+    //    （nvs_flash_init 可重复调用，返回 ESP_OK）
 
     // 5. 释放经典蓝牙内存
     esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);

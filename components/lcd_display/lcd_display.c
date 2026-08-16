@@ -1286,15 +1286,148 @@ static void button_poll_task(void *arg)
 }
 
 /* ================================================================
+ * 开机模式选择菜单 (v2.5.0)
+ *
+ * 阻塞式显示：开机后立即调用，6秒超时默认侦测。
+ * A 键(User/GPIO0) 切换，B 键(Boot/GPIO28) 确认。
+ * ================================================================ */
+boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
+{
+    /* 确保按键 GPIO 已配置为上拉输入 */
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << BTN_USER_PIN) | (1ULL << BTN_BOOT_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
+
+    boot_mode_t sel = BOOT_MODE_DETECTOR;
+    uint32_t start = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint32_t last_redraw = 0;
+    bool user_was_low = false;
+    bool boot_was_low = false;
+    const uint32_t debounce_ms = 30;
+
+    while (1) {
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t elapsed = now - start;
+        if (elapsed >= timeout_ms) {
+            /* 超时：清除屏幕并返回默认侦测 */
+            fb_fill(C_BG);
+            flush_framebuffer();
+            return BOOT_MODE_DETECTOR;
+        }
+
+        int user_lvl = gpio_get_level(BTN_USER_PIN);
+        int boot_lvl = gpio_get_level(BTN_BOOT_PIN);
+
+        /* A 键(User)：按下→释放切换选项 */
+        if (user_lvl == 0) {
+            user_was_low = true;
+        } else if (user_was_low) {
+            user_was_low = false;
+            sel = (sel == BOOT_MODE_DETECTOR) ? BOOT_MODE_SIMULATOR : BOOT_MODE_DETECTOR;
+            last_redraw = 0;  /* 立即重绘 */
+        }
+
+        /* B 键(Boot)：按下→释放确认 */
+        if (boot_lvl == 0) {
+            boot_was_low = true;
+        } else if (boot_was_low) {
+            boot_was_low = false;
+            fb_fill(C_BG);
+            flush_framebuffer();
+            return sel;
+        }
+
+        /* 200ms 重绘一次（倒计时更新） */
+        if (now - last_redraw >= 200 || last_redraw == 0) {
+            last_redraw = now;
+            uint32_t remain = (timeout_ms - elapsed) / 1000;
+
+            fb_fill(C_BG);
+
+            /* 标题 */
+            fb_text_center(40, "RID 2-in-1", C_CYAN);
+            fb_fillrect(20, 64, LCD_WIDTH - 40, 1, C_DIM);
+
+            /* 选项 1：侦测模式 */
+            {
+                int y1 = 90;
+                bool on = (sel == BOOT_MODE_DETECTOR);
+                if (on) {
+                    fb_fillrect(10, y1 - 2, LCD_WIDTH - 20, 30, rgb565(0, 40, 70));
+                    fb_fillrect(10, y1 - 2, 3, 30, C_CYAN);
+                }
+                fb_text(26, y1 + 6, on ? "> DETECTOR" : "  DETECTOR",
+                        on ? C_WHITE : C_GRAY);
+            }
+
+            /* 选项 2：模拟模式 */
+            {
+                int y2 = 130;
+                bool on = (sel == BOOT_MODE_SIMULATOR);
+                if (on) {
+                    fb_fillrect(10, y2 - 2, LCD_WIDTH - 20, 30, rgb565(0, 40, 70));
+                    fb_fillrect(10, y2 - 2, 3, 30, C_CYAN);
+                }
+                fb_text(26, y2 + 6, on ? "> SIMULATOR" : "  SIMULATOR",
+                        on ? C_WHITE : C_GRAY);
+            }
+
+            fb_fillrect(20, 180, LCD_WIDTH - 40, 1, C_DIM);
+
+            /* 操作提示 */
+            fb_text_center(200, "A:Switch  B:OK", C_LTGRAY);
+
+            /* 倒计时 */
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%lus auto-detect", (unsigned long)(remain + 1));
+            fb_text_center(226, buf, C_GRAY);
+
+            /* 版本 */
+            fb_text_center(280, "v2.5.0", C_DIM);
+
+            flush_framebuffer();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/* ================================================================
  * 公开 API
  * ================================================================ */
-int lcd_display_init(void)
+
+/* 早期硬件初始化标记，避免重复初始化 framebuffer/LCD 硬件 */
+static bool s_hw_inited = false;
+
+int lcd_display_early_init(void)
 {
-    ESP_LOGI(TAG, "=== LCD 模块初始化（lcdfix13）===");
+    if (s_hw_inited) return 0;
+    ESP_LOGI(TAG, "=== LCD 早期硬件初始化（开机菜单用）===");
 
     if (init_framebuffer() != 0) return -1;
     if (init_lcd() != 0) return -1;
     init_backlight();
+
+    s_hw_inited = true;
+    return 0;
+}
+
+int lcd_display_init(void)
+{
+    ESP_LOGI(TAG, "=== LCD 模块初始化（v2.5.0）===");
+
+    /* 若开机菜单已初始化过硬件，跳过 framebuffer/SPI/背光初始化 */
+    if (!s_hw_inited) {
+        if (init_framebuffer() != 0) return -1;
+        if (init_lcd() != 0) return -1;
+        init_backlight();
+        s_hw_inited = true;
+    }
 
     /* 开机测试：四角方块 + 十字线 */
     fb_fill(rgb565(0, 20, 50));
