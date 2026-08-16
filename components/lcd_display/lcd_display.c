@@ -731,7 +731,7 @@ static void render_list(void)
 
         /* 第一行：编号 + 型号/ID（截断），协议标签右侧 */
         const char *label_text;
-        char id_buf[48];
+        char id_buf[64];
         if (s_tracker[i].is_dji && s_tracker[i].dji_model[0]) {
             snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
             label_text = id_buf;
@@ -816,7 +816,7 @@ static void render_detail(void)
     char buf[48];
 
     /* 标题：型号 + (n/N) */
-    char title_buf[48];
+    char title_buf[64];
     int total_active = 0;
     xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
     for (int i = 0; i < s_max_uavs; i++)
@@ -833,7 +833,7 @@ static void render_detail(void)
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(0, 30, 60));
         const char *id = s_tracker[idx].basic_id.uas_id[0] ?
             s_tracker[idx].basic_id.uas_id : "RID";
-        char brand[16], model[32], title_model[48];
+        char brand[16], model[32], title_model[64];
         if (crid_brand_lookup_sn(id, brand, sizeof(brand), model, sizeof(model)) && model[0]) {
             snprintf(title_model, sizeof(title_model), "%s %s", brand, model);
             id = title_model;
