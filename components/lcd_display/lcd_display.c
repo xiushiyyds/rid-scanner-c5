@@ -28,6 +28,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include <crid_brand.h>
 #include "esp_timer.h"
 #include "driver/ledc.h"
 #include "esp_cache.h"
@@ -735,9 +736,19 @@ static void render_list(void)
             snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, s_tracker[i].dji_model);
             label_text = id_buf;
         } else {
-            const char *id = s_tracker[i].basic_id.uas_id[0] ?
-                s_tracker[i].basic_id.uas_id : "----";
-            snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, id);
+            /* v2.2.1: 用 SN 前缀查品牌/型号，让非 DJI 设备也能显示机型 */
+            char brand[16], model[32];
+            const char *sn = s_tracker[i].basic_id.uas_id[0] ?
+                s_tracker[i].basic_id.uas_id : NULL;
+            if (sn && crid_brand_lookup_sn(sn, brand, sizeof(brand), model, sizeof(model))) {
+                if (model[0])
+                    snprintf(id_buf, sizeof(id_buf), "%d.%s %s", idx + 1, brand, model);
+                else
+                    snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, brand);
+            } else {
+                const char *id = sn ? sn : "----";
+                snprintf(id_buf, sizeof(id_buf), "%d.%s", idx + 1, id);
+            }
             label_text = id_buf;
         }
 
@@ -822,6 +833,11 @@ static void render_detail(void)
         fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(0, 30, 60));
         const char *id = s_tracker[idx].basic_id.uas_id[0] ?
             s_tracker[idx].basic_id.uas_id : "RID";
+        char brand[16], model[32], title_model[48];
+        if (crid_brand_lookup_sn(id, brand, sizeof(brand), model, sizeof(model)) && model[0]) {
+            snprintf(title_model, sizeof(title_model), "%s %s", brand, model);
+            id = title_model;
+        }
         snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", id, s_detail_sel + 1, total_active);
         fb_text_trunc(4, y, title_buf, C_CYAN, LCD_WIDTH - 8);
     }

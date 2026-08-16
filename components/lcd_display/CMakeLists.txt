@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "lcd_display.c" "lcd_font.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_lcd driver esp_driver_spi esp_driver_gpio esp_driver_i2c esp_timer esp_mm crid_common
+    REQUIRES esp_lcd driver esp_driver_spi esp_driver_gpio esp_driver_i2c esp_timer esp_mm crid_common main_rx
 )
 
 # 强制 C/C++ 源码按 UTF-8 解析（Windows MSVC/GCC 兼容）
