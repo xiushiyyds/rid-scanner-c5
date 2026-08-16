@@ -11,6 +11,7 @@
 #include "gps_module.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "GPS";
 
@@ -37,6 +38,9 @@ static gps_data_t gps_state = {
 };
 
 static bool gps_lock_acquired = false;
+
+/* GPS 同步的 Unix 时间戳（秒），0 = 未同步 */
+static volatile time_t gps_unix_time = 0;
 
 /* 保护 gps_state 的自旋锁（不能传 NULL 给 taskENTER_CRITICAL） */
 static portMUX_TYPE gps_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -171,10 +175,31 @@ static void parse_rmc(const char *sentence)
         else break;
     }
     
-    if (field_count < 8) return;
+    if (field_count < 10) return;
     
     // Field 1: Status (A=active, V=void)
     if (fields[1][0] != 'A') return;
+
+    /* Field 0: UTC time hhmmss.ss → 解析时分秒
+     * Field 9: date ddmmyy → 解析日期 */
+    if (strlen(fields[0]) >= 6 && strlen(fields[9]) == 6) {
+        int hh = (fields[0][0]-'0')*10 + (fields[0][1]-'0');
+        int mm = (fields[0][2]-'0')*10 + (fields[0][3]-'0');
+        int ss = (fields[0][4]-'0')*10 + (fields[0][5]-'0');
+        int day   = (fields[9][0]-'0')*10 + (fields[9][1]-'0');
+        int month = (fields[9][2]-'0')*10 + (fields[9][3]-'0');
+        int year  = (fields[9][4]-'0')*10 + (fields[9][5]-'0') + 2000;
+        /* 手动计算 UTC Unix 时间戳，避免 mktime 时区问题 */
+        static const uint16_t dom[] = {0,31,59,90,120,151,181,212,243,273,304,334};
+        uint32_t days = 0;
+        for (int y = 1970; y < year; y++) {
+            days += ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) ? 366 : 365;
+        }
+        days += dom[month - 1] + day - 1;
+        if (month > 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+            days++;
+        gps_unix_time = (time_t)(days * 86400 + hh * 3600 + mm * 60 + ss);
+    }
     
     // 使用本地暂存，原子性提交
     gps_data_t pending;
@@ -365,4 +390,21 @@ double gps_bearing(double lat1, double lon1, double lat2, double lon2)
     double y = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dlon);
     double bearing = atan2(x, y) * 180.0 / M_PI;
     return fmod(bearing + 360.0, 360.0);
+}
+
+time_t gps_get_unix_time(void)
+{
+    if (gps_unix_time == 0) return 0;
+    /* 基础时间 + 系统运行时间差（近似，GPS 每秒更新一次 RMC） */
+    static time_t last_sync = 0;
+    static int64_t last_sync_us = 0;
+    time_t t = gps_unix_time;
+    if (t != last_sync) {
+        last_sync = t;
+        last_sync_us = esp_timer_get_time();
+    }
+    if (last_sync_us > 0) {
+        t += (time_t)((esp_timer_get_time() - last_sync_us) / 1000000);
+    }
+    return t;
 }

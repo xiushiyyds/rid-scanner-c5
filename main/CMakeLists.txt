@@ -18,6 +18,7 @@ idf_component_register(
         "${MAIN_RX_DIR}/gps_module.c"
         "${MAIN_RX_DIR}/crid_usb_net.c"
         "${MAIN_RX_DIR}/dji_droneid.c"
+        "${MAIN_RX_DIR}/evlog.c"
     INCLUDE_DIRS "${MAIN_RX_DIR}"
     PRIV_REQUIRES opendroneid bt lcd_display crid_common
     REQUIRES nvs_flash esp_wifi esp_netif esp_event log

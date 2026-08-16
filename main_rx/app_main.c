@@ -53,6 +53,7 @@
 #include "lcd_display.h"
 #include "driver/gpio.h"
 #include "dji_droneid.h"
+#include "evlog.h"
 
 #ifndef CRID_VERSION_STRING
 #define CRID_VERSION_STRING "2.2.0-detector"
@@ -163,6 +164,10 @@ static void parser_task(void *pvParameter) {
             uav->last_seen_ms = esp_log_timestamp();
             uav->last_rssi = msg.rssi;
             uav->last_channel = msg.channel;
+            crid_tracker_update_rssi(uav, msg.rssi);
+
+            /* 证据留存：每 5 秒记录一条 */
+            if (uav->msg_count % 10 == 0) evlog_write(uav);
             uav->is_dji = true;
             uav->protocol = RID_PROTOCOL_UNKNOWN;
 
@@ -308,6 +313,10 @@ static void parser_task(void *pvParameter) {
         uav->last_seen_ms = esp_log_timestamp();
         uav->last_rssi = msg.rssi;
         uav->last_channel = msg.channel;
+        crid_tracker_update_rssi(uav, msg.rssi);
+
+        /* 证据留存：每 10 条消息记录一次（约 5 秒） */
+        if (uav->msg_count % 10 == 0) evlog_write(uav);
 
         uav->oui[0] = msg.oui[0];
         uav->oui[1] = msg.oui[1];
@@ -540,6 +549,9 @@ void app_main(void) {
     // 3. GPS
     gps_init();
     ESP_LOGI("RID_MAIN", "GPS module initialized");
+
+    // 3.5 证据日志
+    evlog_init();
 
     // 4. NVS + netif + event loop
     esp_err_t ret = nvs_flash_init();

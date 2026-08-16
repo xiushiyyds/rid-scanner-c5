@@ -754,11 +754,19 @@ static void render_list(void)
 
         const char *plabel = s_tracker[i].is_dji ? "DJI" : protocol_label(s_tracker[i].protocol);
         uint16_t pcolor = s_tracker[i].is_dji ? C_ORANGE : protocol_color(s_tracker[i].protocol);
+        bool list_alert = (s_tracker[i].alert_level > 0);
+        char plabel_buf[16];
+        if (list_alert) {
+            snprintf(plabel_buf, sizeof(plabel_buf), "!%s", plabel);
+            plabel = plabel_buf;
+            pcolor = C_RED;
+        }
         int plabel_w = lcd_font_text_width(plabel);
 
         /* ID 最大宽度：屏幕宽 - 左右边距 - 协议标签宽 - 间距 */
         int max_id_w = LCD_WIDTH - 10 - plabel_w - 6;
-        fb_text_trunc(5, iy, label_text, sel ? C_WHITE : C_GREEN, max_id_w);
+        uint16_t id_color = list_alert ? C_RED : (sel ? C_WHITE : C_GREEN);
+        fb_text_trunc(5, iy, label_text, id_color, max_id_w);
         fb_text_right(LCD_WIDTH - 5, iy, plabel, pcolor);
         iy += FONT_LINE_H + 1;
 
@@ -823,14 +831,19 @@ static void render_detail(void)
         if (s_tracker[i].active) total_active++;
     xSemaphoreGive(s_tracker_mutex);
 
+    /* 告警时标题栏变红 */
+    bool has_alert = (s_tracker[idx].alert_level > 0);
     if (s_tracker[idx].is_dji) {
-        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(60, 30, 0));
+        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4,
+                    has_alert ? rgb565(80, 0, 0) : rgb565(60, 30, 0));
         const char *model = s_tracker[idx].dji_model[0] ?
             s_tracker[idx].dji_model : "DJI Drone";
-        snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", model, s_detail_sel + 1, total_active);
-        fb_text_trunc(4, y, title_buf, C_ORANGE, LCD_WIDTH - 8);
+        snprintf(title_buf, sizeof(title_buf), "%s%s (%d/%d)",
+                 has_alert ? "[!] " : "", model, s_detail_sel + 1, total_active);
+        fb_text_trunc(4, y, title_buf, has_alert ? C_RED : C_ORANGE, LCD_WIDTH - 8);
     } else {
-        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4, rgb565(0, 30, 60));
+        fb_fillrect(0, y - 2, LCD_WIDTH, FONT_LINE_H + 4,
+                    has_alert ? rgb565(80, 0, 0) : rgb565(0, 30, 60));
         const char *id = s_tracker[idx].basic_id.uas_id[0] ?
             s_tracker[idx].basic_id.uas_id : "RID";
         char brand[16], model[32], title_model[64];
@@ -838,15 +851,21 @@ static void render_detail(void)
             snprintf(title_model, sizeof(title_model), "%s %s", brand, model);
             id = title_model;
         }
-        snprintf(title_buf, sizeof(title_buf), "%s (%d/%d)", id, s_detail_sel + 1, total_active);
-        fb_text_trunc(4, y, title_buf, C_CYAN, LCD_WIDTH - 8);
+        snprintf(title_buf, sizeof(title_buf), "%s%s (%d/%d)",
+                 has_alert ? "[!] " : "", id, s_detail_sel + 1, total_active);
+        fb_text_trunc(4, y, title_buf, has_alert ? C_RED : C_CYAN, LCD_WIDTH - 8);
     }
     y += FONT_LINE_H + 4;
 
-    /* 第二行：信号条 + RSSI + 电量（两列） */
+    /* 第二行：信号条 + RSSI + 趋势箭头 + 电量（两列） */
     draw_signal_bars(4, y + 1, s_tracker[idx].last_rssi, 4);
     snprintf(buf, sizeof(buf), "%ddBm", s_tracker[idx].last_rssi);
     fb_text(30, y, buf, C_CYAN);
+    /* 趋势箭头：^=接近(绿) v=远离(黄) */
+    if (s_tracker[idx].rssi_trend > 0)
+        fb_text(30 + 8 * (int)strlen(buf), y, "^", C_GREEN);
+    else if (s_tracker[idx].rssi_trend < 0)
+        fb_text(30 + 8 * (int)strlen(buf), y, "v", C_YELLOW);
 
     if (s_tracker[idx].is_dji && s_tracker[idx].dji_battery > 0 && s_tracker[idx].dji_battery <= 100) {
         snprintf(buf, sizeof(buf), "电量%d%%", s_tracker[idx].dji_battery);

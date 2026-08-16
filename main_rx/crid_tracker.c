@@ -73,6 +73,32 @@ uav_track_t *crid_tracker_get_table(void) {
     return g_uavs;
 }
 
+void crid_tracker_update_rssi(uav_track_t *uav, int8_t rssi) {
+    if (!uav) return;
+    uav->rssi_hist[uav->rssi_hist_idx] = rssi;
+    uav->rssi_hist_idx = (uav->rssi_hist_idx + 1) % 6;
+    if (uav->rssi_hist_cnt < 6) uav->rssi_hist_cnt++;
+
+    if (uav->rssi_hist_cnt >= 4) {
+        /* 前半窗口均值 vs 后半窗口均值 */
+        int old_sum = 0, new_sum = 0;
+        int half = uav->rssi_hist_cnt / 2;
+        int start = (uav->rssi_hist_idx - uav->rssi_hist_cnt + 6) % 6;
+        for (int k = 0; k < half; k++) {
+            old_sum += uav->rssi_hist[(start + k) % 6];
+        }
+        for (int k = half; k < uav->rssi_hist_cnt; k++) {
+            new_sum += uav->rssi_hist[(start + k) % 6];
+        }
+        int old_avg = old_sum / half;
+        int new_avg = new_sum / (uav->rssi_hist_cnt - half);
+        int diff = new_avg - old_avg;  /* RSSI 变大(数值更正)=信号增强=接近 */
+        if (diff >= 3) uav->rssi_trend = 1;        /* 接近 */
+        else if (diff <= -3) uav->rssi_trend = -1; /* 远离 */
+        else uav->rssi_trend = 0;
+    }
+}
+
 void crid_tracker_cleanup(uint32_t timeout_ms) {
     uint32_t now = esp_log_timestamp();
     for (int i = 0; i < MAX_TRACKED_UAVS; i++) {

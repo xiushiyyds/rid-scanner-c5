@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 typedef struct {
     bool valid;         // Has valid fix
@@ -44,5 +45,11 @@ double gps_distance(double lat1, double lon1, double lat2, double lon2);
  * Calculate bearing in degrees (0-360) from point 1 to point 2
  */
 double gps_bearing(double lat1, double lon1, double lat2, double lon2);
+
+/**
+ * Get current Unix timestamp (seconds since 1970-01-01 UTC).
+ * Returns 0 if GPS has not provided a valid time yet.
+ */
+time_t gps_get_unix_time(void);
 
 #endif // GPS_MODULE_H

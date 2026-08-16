@@ -46,6 +46,13 @@ uav_track_t *crid_tracker_get_table(void);
  */
 void crid_tracker_cleanup(uint32_t timeout_ms);
 
+/**
+ * 更新某目标的 RSSI 采样并计算趋势
+ * @param uav   追踪条目
+ * @param rssi  本次 RSSI 值
+ */
+void crid_tracker_update_rssi(uav_track_t *uav, int8_t rssi);
+
 #ifdef __cplusplus
 }
 #endif
