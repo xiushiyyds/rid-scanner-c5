@@ -107,6 +107,7 @@ static uint16_t g_nus_tx_cccd_handle;  /* CCCD descriptor handle (tx_handle + 1)
 static uint16_t g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool g_ble_initialized = false;
 static bool g_subscribed = false;     /* 手机是否已使能通知 */
+static bool g_pair_ok_sent = false;   /* PAIR_OK 是否已发送（防重复） */
 static esp_timer_handle_t g_adv_timer = NULL;
 #define ADV_TIMEOUT_US (60 * 1000 * 1000)
 
@@ -140,6 +141,7 @@ static void ble_on_sync(void);
 static void ble_advertise_start(void);
 static void ble_connect_task(void *arg);
 static void ble_delayed_scan_task(void *arg);
+static void ble_send_welcome_task(void *arg);  /* v2.1.1: SUBSCRIBE 后发 PAIR_OK */
 static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
 
 /* ================================================================
@@ -253,6 +255,7 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGW(TAG, "Disconnected (reason=0x%04x)", event->disconnect.reason);
         g_nus_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         g_subscribed = false;
+        g_pair_ok_sent = false;
         crid_ble_reset_pair();
         /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
          * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
@@ -282,6 +285,14 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                      event->subscribe.attr_handle);
             g_subscribed = true;
             g_paired = true;
+
+            /* v2.1.1: CCCD 写入完成 = 通知通道已就绪，这是发 PAIR_OK
+             * 最可靠的时机。不能在 GAP 回调里直接调 write_cb（host task
+             * 上下文不可阻塞），创建独立 task 延迟 50ms 后发送。 */
+            if (!g_pair_ok_sent) {
+                g_pair_ok_sent = true;
+                xTaskCreate(ble_send_welcome_task, "ble_welcome", 2048, NULL, 5, NULL);
+            }
         }
         break;
 
@@ -416,54 +427,55 @@ ble_advertise_start(void)
 }
 
 /* ================================================================
- * 连接建立后：切换扫描到 LOW duty → 等手机完成 service discovery
- * + CCCD → 发 PAIR_OK
- *
- * v2.1.0 关键变化：
- *   - 不停止 BLE 扫描，只切 LOW duty (40%)
- *   - 整个过程约 800ms（v2.0.10 需要 3.5 秒）
- *   - 40% duty 下控制器在 scan window 间隙自动处理 GATT 事件
+ * v2.1.1: SUBSCRIBE 事件后发送 PAIR_OK + STATUS
+ * CCCD 写入完成 = 通知通道已就绪，此时发数据一定能到达手机。
+ * 在独立 task 中执行（不能在 GAP 回调上下文阻塞）。
  * ================================================================ */
-static void ble_connect_task(void *arg) {
+static void ble_send_welcome_task(void *arg) {
     (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(50));  /* 让控制器完成 CCCD 响应 */
 
-    /* 第1步：切换扫描占空比到 LOW (40%)。
-     * 先 stop → set_duty_low → delay → start。
-     * stop/start 之间短延迟让控制器完成 cancel。
-     * 此时 BLE 扫描暂停的几十毫秒内，控制器可以立即处理
-     * GATT connection update 和开始 service discovery。 */
-    crid_ble_scan_stop();
-    crid_ble_scan_set_duty_low();
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGW(TAG, "Disconnected during setup, aborting connect task");
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE || !g_subscribed) {
+        ESP_LOGW(TAG, "Welcome task: disconnected or not subscribed, abort");
         vTaskDelete(NULL);
         return;
     }
 
-    crid_ble_scan_start();
-    ESP_LOGI(TAG, "BLE scan resumed in LOW duty (40%%) for GATT coexist");
-
-    /* 第2步：等手机完成 service discovery + CCCD 写入。
-     * LOW duty 40% 下，CCCD 写入正常到达。
-     * 手机流程：connect → getPrimaryService → getCharacteristic(TX) →
-     *          startNotifications() → write CCCD → SUBSCRIBE event
-     * 通常 200-500ms，给 500ms 余量。 */
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        vTaskDelete(NULL);
-        return;
-    }
-
-    /* 第3步：发 PAIR_OK + STATUS */
     const char *pair_ok = "PAIR_OK\n";
     crid_ble_write_cb(pair_ok, strlen(pair_ok), NULL);
     vTaskDelay(pdMS_TO_TICKS(50));
     const char *status = "STATUS:targets:0,gps:searching\n";
     crid_ble_write_cb(status, strlen(status), NULL);
-    ESP_LOGI(TAG, "Sent PAIR_OK + STATUS (subscribed=%d)", g_subscribed);
+    ESP_LOGI(TAG, "Sent PAIR_OK + STATUS (notification channel ready)");
+
+    vTaskDelete(NULL);
+}
+
+/* ================================================================
+ * 连接建立后：只负责切换扫描占空比到 LOW (40%)。
+ *
+ * v2.1.1 关键变化：
+ *   - 不再固定延时发 PAIR_OK，改由 SUBSCRIBE 事件触发
+ *   - 手机 CCCD 写入可能需要 200ms~2s（取决于手机性能），
+ *     固定 500ms 延时会在通知通道就绪前丢数据
+ *   - 占空比切换让控制器在扫描间隙处理 service discovery
+ * ================================================================ */
+static void ble_connect_task(void *arg) {
+    (void)arg;
+
+    /* 切换扫描占空比到 LOW (40%)，给 GATT service discovery 让出射频时间 */
+    crid_ble_scan_stop();
+    crid_ble_scan_set_duty_low();
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "Disconnected during duty switch, aborting connect task");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    crid_ble_scan_start();
+    ESP_LOGI(TAG, "BLE scan in LOW duty (40%%), waiting for CCCD subscribe...");
 
     vTaskDelete(NULL);
 }
