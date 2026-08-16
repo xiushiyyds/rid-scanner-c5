@@ -135,8 +135,11 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         break;
                     }
 
-                    uint8_t *dji_payload = &ie_ptr[i + 6];
-                    uint8_t dji_len = len - 4;
+                    /* DJI Vendor IE: [ID][len][OUI 3B][payload...]
+                     * payload 紧跟 OUI 之后（无 vendor_type 字节），
+                     * 从 ie_ptr[i+5] 开始，长度 len-3。 */
+                    uint8_t *dji_payload = &ie_ptr[i + 5];
+                    uint8_t dji_len = len - 3;
 
                     if (dji_len >= 4) {
                         sniffer_msg_t msg;
@@ -260,8 +263,8 @@ static void channel_hold_task(void *pvParameter) {
         idx = (idx + 1) % SCAN_CHANNEL_COUNT;
 
         /* 分段 delay，stop 时能快速退出 */
-        for (int i = 0; i < (dwell / 100) && !s_hold_should_stop; i++) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        for (int i = 0; i < (dwell / 50) && !s_hold_should_stop; i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
 
         if (s_hold_should_stop) break;

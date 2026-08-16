@@ -287,18 +287,23 @@ static int parse_telemetry(const uint8_t *record, uint16_t rec_len,
 
         data->product_type = record[65];
     } else {
-        /* 短格式：无 pilot GPS 块 */
+        /* 短格式（54 字节 record，旧固件如 Mavic Pro/Spark）：
+         * [41..44] home_lon, [45..48] home_lat, [49] product_type.
+         * 无 phone_app_gps_time，无 pilot GPS 块。
+         * 注意：必须检查 rec_len 防止越界读。 */
         data->has_pilot_gps = false;
-        data->gps_time_ms = rd_u64le(&record[41]);
+        data->gps_time_ms = 0;
         data->pilot_latitude  = 0.0;
         data->pilot_longitude = 0.0;
 
-        int32_t raw_home_lon = rd_s32le(&record[49]);
-        int32_t raw_home_lat = rd_s32le(&record[53]);
-        data->home_longitude = (double)raw_home_lon / DJI_COORD_SCALE;
-        data->home_latitude  = (double)raw_home_lat / DJI_COORD_SCALE;
-
-        data->product_type = record[57];
+        /* 短格式最小 50 字节即可包含 home 坐标 + product_type */
+        if (rec_len >= 50) {
+            int32_t raw_home_lon = rd_s32le(&record[41]);
+            int32_t raw_home_lat = rd_s32le(&record[45]);
+            data->home_longitude = (double)raw_home_lon / DJI_COORD_SCALE;
+            data->home_latitude  = (double)raw_home_lat / DJI_COORD_SCALE;
+            data->product_type = record[49];
+        }
     }
 
     strncpy(data->model_name, dji_product_type_name(data->product_type),
