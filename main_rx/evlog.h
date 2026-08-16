@@ -17,29 +17,33 @@
 extern "C" {
 #endif
 
-#define EVLOG_RECORD_SIZE   64
+#define EVLOG_RECORD_SIZE   128
 #define EVLOG_MAGIC         0x4556   // "EV"
-#define EVLOG_MAX_RECORDS   ((2 * 1024 * 1024) / EVLOG_RECORD_SIZE)  // ~32768 条
+#define EVLOG_MAX_RECORDS   ((2 * 1024 * 1024) / EVLOG_RECORD_SIZE)  // ~16384 条
 
-/* 证据记录结构体（固定 64 字节，紧凑排列） */
+/* 证据记录结构体（固定 128 字节，紧凑排列，SN 完整不截断） */
 typedef struct __attribute__((packed)) {
     uint16_t magic;           // 0x4556
-    uint16_t flags;           // bit0=is_dji, bit1-3=alert_level, bit4=has_location
+    uint16_t flags;           // bit0=is_dji, bit1-3=alert_level, bit4=has_drone_loc, bit5=has_pilot_loc
     uint32_t timestamp;       // Unix 时间戳（秒，由 GPS 提供，0=未同步）
     uint8_t  mac[6];          // 源 MAC
     int8_t   rssi;            // 信号强度 dBm
     uint8_t  channel;         // 信道
     uint8_t  ua_type;         // UA 类型
-    char     sn[20];          // 序列号/SN（DJI SN 为 15 位，国标 RID 为 20 位）
-    double   latitude;        // 纬度
-    double   longitude;       // 经度
-    float    altitude;        // 海拔高度 (m)
+    char     sn[24];          // 序列号/SN（完整存储，含 null）
+    double   drone_lat;       // 无人机纬度
+    double   drone_lon;       // 无人机经度
+    double   pilot_lat;       // 飞手/操作员纬度
+    double   pilot_lon;       // 飞手/操作员经度
+    float    altitude;        // 海拔/相对高度 (m)
     float    speed;           // 水平速度 (m/s)
     uint16_t heading;         // 航向 (度, 0-360)
     uint8_t  battery;         // 电量 (DJI, 0=未知)
+    uint8_t  protocol;        // 协议类型 rid_protocol_t
+    uint8_t  reserved[43];    // 预留扩展
 } evlog_record_t;
 
-_Static_assert(sizeof(evlog_record_t) == EVLOG_RECORD_SIZE, "evlog record must be 64 bytes");
+_Static_assert(sizeof(evlog_record_t) == EVLOG_RECORD_SIZE, "evlog record must be 128 bytes");
 
 /**
  * 初始化证据日志模块

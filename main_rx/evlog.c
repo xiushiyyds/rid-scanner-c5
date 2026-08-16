@@ -115,7 +115,7 @@ int evlog_write(const uav_track_t *track) {
     if (track->is_dji) flags |= 0x0001;
     flags |= ((uint16_t)(track->alert_level & 0x07) << 1);
 
-    /* SN */
+    /* SN — 完整复制，不截断 */
     const char *sn = NULL;
     if (track->is_dji) {
         sn = track->dji_serial[0] ? track->dji_serial : NULL;
@@ -124,39 +124,61 @@ int evlog_write(const uav_track_t *track) {
         sn = track->basic_id.uas_id[0] ? track->basic_id.uas_id : NULL;
     }
     if (sn) {
-        strncpy(rec.sn, sn, sizeof(rec.sn) - 1);
+        size_t snlen = strlen(sn);
+        if (snlen >= sizeof(rec.sn)) snlen = sizeof(rec.sn) - 1;
+        memcpy(rec.sn, sn, snlen);
+        rec.sn[snlen] = '\0';
     }
     rec.ua_type = track->basic_id.ua_type;
+    rec.protocol = track->protocol;
 
-    /* 坐标 */
-    double lat = 0, lon = 0;
+    /* 无人机坐标 */
+    double dlat = 0, dlon = 0;
     float alt = 0, spd = 0;
     uint16_t hdg = 0;
-    bool has_loc = false;
+    bool has_dloc = false;
 
     if (track->is_dji) {
-        lat = track->dji_latitude;
-        lon = track->dji_longitude;
+        dlat = track->dji_latitude;
+        dlon = track->dji_longitude;
         alt = track->dji_altitude;
         spd = track->dji_speed_h;
         hdg = (uint16_t)((int)track->dji_heading % 360);
-        if (lat != 0 && lon != 0) has_loc = true;
+        if (dlat != 0 && dlon != 0) has_dloc = true;
     } else if (track->location.valid) {
-        lat = track->location.latitude;
-        lon = track->location.longitude;
+        dlat = track->location.latitude;
+        dlon = track->location.longitude;
         alt = track->location.altitude_geo;
         spd = track->location.speed_horizontal;
         hdg = (uint16_t)((int)track->location.direction % 360);
-        if (lat != 0 && lon != 0) has_loc = true;
+        if (dlat != 0 && dlon != 0) has_dloc = true;
     }
 
-    if (has_loc) {
+    if (has_dloc) {
         flags |= 0x0010;
-        rec.latitude = lat;
-        rec.longitude = lon;
+        rec.drone_lat = dlat;
+        rec.drone_lon = dlon;
         rec.altitude = alt;
         rec.speed = spd;
         rec.heading = hdg;
+    }
+
+    /* 飞手/操作员坐标 */
+    double plat = 0, plon = 0;
+    bool has_ploc = false;
+    if (track->is_dji) {
+        plat = track->dji_pilot_lat;
+        plon = track->dji_pilot_lon;
+        if (plat != 0 && plon != 0) has_ploc = true;
+    } else if (track->system.valid) {
+        plat = track->system.operator_latitude;
+        plon = track->system.operator_longitude;
+        if (plat != 0 && plon != 0) has_ploc = true;
+    }
+    if (has_ploc) {
+        flags |= 0x0020;
+        rec.pilot_lat = plat;
+        rec.pilot_lon = plon;
     }
 
     rec.flags = flags;
