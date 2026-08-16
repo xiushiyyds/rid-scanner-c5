@@ -463,19 +463,20 @@ static void ble_send_welcome_task(void *arg) {
 static void ble_connect_task(void *arg) {
     (void)arg;
 
-    /* 切换扫描占空比到 LOW (40%)，给 GATT service discovery 让出射频时间 */
+    /* v2.1.4: 连接期间完全停止 BLE RID 扫描，确保 GATT 通知可靠送达。
+     * C5 控制器在 scan + GATT 连接并行时 notify 数据丢失（host 层返回0，
+     * 但空中未发出），这是手机收不到数据的根因。
+     * WiFi sniffer 继续运行，BLE RID 广播在连接期间暂时不扫描。*/
     crid_ble_scan_stop();
-    crid_ble_scan_set_duty_low();
     vTaskDelay(pdMS_TO_TICKS(50));
 
     if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGW(TAG, "Disconnected during duty switch, aborting connect task");
+        ESP_LOGW(TAG, "Disconnected during scan stop, aborting connect task");
         vTaskDelete(NULL);
         return;
     }
 
-    crid_ble_scan_start();
-    ESP_LOGI(TAG, "BLE scan in LOW duty (40%%), waiting for CCCD subscribe...");
+    ESP_LOGI(TAG, "BLE scan STOPPED for GATT connection (notify reliability)");
 
     vTaskDelete(NULL);
 }
