@@ -30,14 +30,13 @@ typedef struct __attribute__((packed)) {
     int8_t   rssi;            // 信号强度 dBm
     uint8_t  channel;         // 信道
     uint8_t  ua_type;         // UA 类型
-    char     sn[24];          // 序列号/SN
+    char     sn[20];          // 序列号/SN（DJI SN 为 15 位，国标 RID 为 20 位）
     double   latitude;        // 纬度
     double   longitude;       // 经度
     float    altitude;        // 海拔高度 (m)
     float    speed;           // 水平速度 (m/s)
     uint16_t heading;         // 航向 (度, 0-360)
     uint8_t  battery;         // 电量 (DJI, 0=未知)
-    uint8_t  reserved[5];     // 预留对齐
 } evlog_record_t;
 
 _Static_assert(sizeof(evlog_record_t) == EVLOG_RECORD_SIZE, "evlog record must be 64 bytes");
