@@ -927,7 +927,16 @@ static void render_detail(void)
     fb_hline(4, y, LCD_WIDTH - 8, C_DIM);
     y += 3;
 
-    /* 底部：MAC + 信道 + 更新时间（小字段落） */
+    /* 底部：SN + MAC + 信道 + 更新时间 */
+    const char *sn_text = s_tracker[idx].is_dji ?
+        (s_tracker[idx].dji_serial[0] ? s_tracker[idx].dji_serial : NULL) :
+        (s_tracker[idx].basic_id.uas_id[0] ? s_tracker[idx].basic_id.uas_id : NULL);
+    if (sn_text) {
+        fb_text(4, y, "SN", C_GREEN);
+        fb_text_trunc(30, y, sn_text, C_LTGRAY, LCD_WIDTH - 34);
+        y += FONT_LINE_H + 1;
+    }
+
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              s_tracker[idx].mac[0], s_tracker[idx].mac[1],
              s_tracker[idx].mac[2], s_tracker[idx].mac[3],
