@@ -334,16 +334,18 @@ esp_err_t crid_sniffer_init(void) {
 
     if (!s_sniffer_wifi_inited) {
         /* 自定义 WiFi init config：大幅削减 buffer 节省内部 SRAM。
-         * sniffer 只收不发，TX buffer 全部设 0。 */
+         * sniffer 只收不发，但 ESP-IDF v5.5 要求 dynamic_tx_buf_num >= 1，
+         * 否则 esp_wifi_init 返回 ESP_ERR_INVALID_ARG。
+         * v2.1.1 修复：dynamic_tx_buf_num 0→1, cache_tx_buf_num 0→1。 */
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         cfg.static_rx_buf_num = 4;        // 10→4, 省 ~10KB
         cfg.dynamic_rx_buf_num = 8;       // 32→8
         cfg.static_tx_buf_num = 0;        // sniffer 不发数据帧
-        cfg.dynamic_tx_buf_num = 0;       // 32→0
+        cfg.dynamic_tx_buf_num = 1;       // v5.5 要求 >=1（原为0导致init失败）
         cfg.rx_ba_win = 2;                // 6→2
         cfg.csi_enable = 0;               // 不需要 CSI
         cfg.mgmt_sbuf_num = 4;            // 32→4
-        cfg.cache_tx_buf_num = 0;         // 不需要 TX cache buffer
+        cfg.cache_tx_buf_num = 1;         // v5.5 要求 >=1（原为0导致init失败）
         cfg.ampdu_tx_enable = 0;          // sniffer 不发 AMPDU
         cfg.amsdu_tx_enable = 0;          // sniffer 不发 AMSDU
 
