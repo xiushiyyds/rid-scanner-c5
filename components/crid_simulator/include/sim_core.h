@@ -160,7 +160,6 @@ typedef struct {
 } sim_city_t;
 
 #define SIM_CITY_COUNT 38
-extern const sim_city_t g_sim_cities[SIM_CITY_COUNT];
 
 #ifdef __cplusplus
 }
