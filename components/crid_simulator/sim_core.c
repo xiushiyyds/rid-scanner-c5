@@ -718,6 +718,97 @@ void sim_set_chan_mode(sim_chan_mode_t mode) {
 }
 
 /* ================================================================
+ * 省/市两级辅助（v2.6.1）
+ * 省份列表在首次扫描城市表时按出现顺序建立。
+ * ================================================================ */
+static const char *s_prov_names[SIM_PROVINCE_COUNT];
+static int s_prov_first[SIM_PROVINCE_COUNT];
+static int s_prov_count_cnt[SIM_PROVINCE_COUNT];
+static bool s_prov_built = false;
+
+static void build_province_table(void) {
+    if (s_prov_built) return;
+    int n = 0;
+    for (int i = 0; i < SIM_CITY_COUNT && n < SIM_PROVINCE_COUNT; i++) {
+        const char *p = g_sim_cities[i].province;
+        int k = -1;
+        for (int j = 0; j < n; j++) {
+            if (s_prov_names[j] == p) { k = j; break; } /* 指针比较，表内同名字符串需去重；安全起见也用 strcmp */
+        }
+        /* 字符串可能不是同一指针，用 strcmp 兜底 */
+        if (k < 0) {
+            for (int j = 0; j < n; j++) {
+                if (strcmp(s_prov_names[j], p) == 0) { k = j; break; }
+            }
+        }
+        if (k < 0) {
+            k = n++;
+            s_prov_names[k] = p;
+            s_prov_first[k] = i;
+            s_prov_count_cnt[k] = 0;
+        }
+        s_prov_count_cnt[k]++;
+    }
+    s_prov_built = true;
+}
+
+int sim_city_province(int city_idx) {
+    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) return -1;
+    build_province_table();
+    const char *p = g_sim_cities[city_idx].province;
+    for (int j = 0; j < SIM_PROVINCE_COUNT; j++) {
+        if (s_prov_names[j] && strcmp(s_prov_names[j], p) == 0) return j;
+    }
+    return -1;
+}
+
+const char *sim_get_province_name(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return "?";
+    return s_prov_names[prov_idx];
+}
+
+int sim_get_province_count(void) { build_province_table(); return SIM_PROVINCE_COUNT; }
+
+int sim_province_first_city(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return -1;
+    return s_prov_first[prov_idx];
+}
+
+int sim_province_city_count(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return 0;
+    return s_prov_count_cnt[prov_idx];
+}
+
+int sim_city_step_within_province(int city_idx, int step) {
+    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) city_idx = 0;
+    int prov = sim_city_province(city_idx);
+    if (prov < 0) return city_idx;
+    int first = s_prov_first[prov];
+    int cnt = s_prov_count_cnt[prov];
+    int last = first + cnt - 1;
+    int next = city_idx + step;
+    if (step > 0) {
+        if (next > last) {
+            /* 跳到下一省第一个城市；到末尾回到 0 */
+            int np = prov + 1;
+            if (np >= SIM_PROVINCE_COUNT) np = 0;
+            next = s_prov_first[np];
+        }
+    } else if (step < 0) {
+        if (next < first) {
+            int np = prov - 1;
+            if (np < 0) np = SIM_PROVINCE_COUNT - 1;
+            next = s_prov_first[np] + s_prov_count_cnt[np] - 1;
+        }
+    }
+    return next;
+}
+
+
+/* ================================================================
  * 串口 CLI
  * ================================================================ */
 static void cli_print_help(void) {
@@ -933,92 +1024,3 @@ void sim_set_city(int idx) {
 }
 int sim_get_city_index(void) { return s_city_index; }
 
-/* ================================================================
- * 省/市两级辅助（v2.6.1）
- * 省份列表在首次扫描城市表时按出现顺序建立。
- * ================================================================ */
-static const char *s_prov_names[SIM_PROVINCE_COUNT];
-static int s_prov_first[SIM_PROVINCE_COUNT];
-static int s_prov_count_cnt[SIM_PROVINCE_COUNT];
-static bool s_prov_built = false;
-
-static void build_province_table(void) {
-    if (s_prov_built) return;
-    int n = 0;
-    for (int i = 0; i < SIM_CITY_COUNT && n < SIM_PROVINCE_COUNT; i++) {
-        const char *p = g_sim_cities[i].province;
-        int k = -1;
-        for (int j = 0; j < n; j++) {
-            if (s_prov_names[j] == p) { k = j; break; } /* 指针比较，表内同名字符串需去重；安全起见也用 strcmp */
-        }
-        /* 字符串可能不是同一指针，用 strcmp 兜底 */
-        if (k < 0) {
-            for (int j = 0; j < n; j++) {
-                if (strcmp(s_prov_names[j], p) == 0) { k = j; break; }
-            }
-        }
-        if (k < 0) {
-            k = n++;
-            s_prov_names[k] = p;
-            s_prov_first[k] = i;
-            s_prov_count_cnt[k] = 0;
-        }
-        s_prov_count_cnt[k]++;
-    }
-    s_prov_built = true;
-}
-
-int sim_city_province(int city_idx) {
-    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) return -1;
-    build_province_table();
-    const char *p = g_sim_cities[city_idx].province;
-    for (int j = 0; j < SIM_PROVINCE_COUNT; j++) {
-        if (s_prov_names[j] && strcmp(s_prov_names[j], p) == 0) return j;
-    }
-    return -1;
-}
-
-const char *sim_get_province_name(int prov_idx) {
-    build_province_table();
-    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return "?";
-    return s_prov_names[prov_idx];
-}
-
-int sim_get_province_count(void) { build_province_table(); return SIM_PROVINCE_COUNT; }
-
-int sim_province_first_city(int prov_idx) {
-    build_province_table();
-    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return -1;
-    return s_prov_first[prov_idx];
-}
-
-int sim_province_city_count(int prov_idx) {
-    build_province_table();
-    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return 0;
-    return s_prov_count_cnt[prov_idx];
-}
-
-int sim_city_step_within_province(int city_idx, int step) {
-    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) city_idx = 0;
-    int prov = sim_city_province(city_idx);
-    if (prov < 0) return city_idx;
-    int first = s_prov_first[prov];
-    int cnt = s_prov_count_cnt[prov];
-    int last = first + cnt - 1;
-    int next = city_idx + step;
-    if (step > 0) {
-        if (next > last) {
-            /* 跳到下一省第一个城市；到末尾回到 0 */
-            int np = prov + 1;
-            if (np >= SIM_PROVINCE_COUNT) np = 0;
-            next = s_prov_first[np];
-        }
-    } else if (step < 0) {
-        if (next < first) {
-            int np = prov - 1;
-            if (np < 0) np = SIM_PROVINCE_COUNT - 1;
-            next = s_prov_first[np] + s_prov_count_cnt[np] - 1;
-        }
-    }
-    return next;
-}
