@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-const sim_city_t g_sim_cities[SIM_CITY_COUNT] = {
+static const sim_city_t g_sim_cities[SIM_CITY_COUNT] = {
     /* 直辖市 */
     {"北京",   39.9042, 116.4074},
     {"上海",   31.2304, 121.4737},
