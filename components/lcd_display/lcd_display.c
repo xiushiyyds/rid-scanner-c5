@@ -1350,7 +1350,7 @@ boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
             fb_fill(C_BG);
 
             /* 标题 */
-            fb_text_center(40, "RID 2-in-1", C_CYAN);
+            fb_text_center(40, "RID 二合一", C_CYAN);
             fb_fillrect(20, 64, LCD_WIDTH - 40, 1, C_DIM);
 
             /* 选项 1：侦测模式 */
@@ -1361,7 +1361,7 @@ boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
                     fb_fillrect(10, y1 - 2, LCD_WIDTH - 20, 30, rgb565(0, 40, 70));
                     fb_fillrect(10, y1 - 2, 3, 30, C_CYAN);
                 }
-                fb_text(26, y1 + 6, on ? "> DETECTOR" : "  DETECTOR",
+                fb_text(26, y1 + 6, on ? "> 侦测模式" : "  侦测模式",
                         on ? C_WHITE : C_GRAY);
             }
 
@@ -1373,22 +1373,22 @@ boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
                     fb_fillrect(10, y2 - 2, LCD_WIDTH - 20, 30, rgb565(0, 40, 70));
                     fb_fillrect(10, y2 - 2, 3, 30, C_CYAN);
                 }
-                fb_text(26, y2 + 6, on ? "> SIMULATOR" : "  SIMULATOR",
+                fb_text(26, y2 + 6, on ? "> 模拟发射" : "  模拟发射",
                         on ? C_WHITE : C_GRAY);
             }
 
             fb_fillrect(20, 180, LCD_WIDTH - 40, 1, C_DIM);
 
             /* 操作提示 */
-            fb_text_center(200, "A:Switch  B:OK", C_LTGRAY);
+            fb_text_center(200, "A切换 B确认", C_LTGRAY);
 
             /* 倒计时 */
             char buf[24];
-            snprintf(buf, sizeof(buf), "%lus auto-detect", (unsigned long)(remain + 1));
+            snprintf(buf, sizeof(buf), "%lus自动侦测", (unsigned long)(remain + 1));
             fb_text_center(226, buf, C_GRAY);
 
             /* 版本 */
-            fb_text_center(280, "v2.5.0", C_DIM);
+            fb_text_center(280, "v2.5.1", C_DIM);
 
             flush_framebuffer();
         }
