@@ -1,1 +1,26 @@
-Y21ha2VfbWluaW11bV9yZXF1aXJlZChWRVJTSU9OIDMuMTYpCgojID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KIyBSZW1vdGVJRCBTY2FubmVyIC0gTmVrb2x1bmFSSUQg5peg5Lq65py66L+c56iL6K+G5Yir5o6l5pS25ZmoCiMgPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQojCiMg55So5rOVOgojICAgaWRmLnB5IC0tcHJldmlldyBzZXQtdGFyZ2V0IGVzcDMyYzUKIyAgIGlkZi5weSAtLXByZXZpZXcgYnVpbGQKIwojIHYxLjMrIOe7k+aehOivtOaYjjoKIyAgIG1haW4vQ01ha2VMaXN0cy50eHQgIOKAlCDkuLvnu4Tku7Yo5YyF6KOFIG1haW5fcngg5rqQ56CBKQojICAgbWFpbl9yeC8gICAgICAgICAgICAg4oCUIOS4u+W6lOeUqOa6kOeggQojICAgY29tcG9uZW50cy8gICAgICAgICAg4oCUIOWtkOe7hOS7tihsY2RfZGlzcGxheSwgY3JpZF9zaW11bGF0b3Ig562JKQojID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KCiMgdjIuMS4wOiBQVEEg56Gs5Lu25YWx5a2YICsgR0I0Njc1MCBCTEUg6Lev5b6E5L+u5aSNICsg5Yig6ZmkIFRERApzZXQoQ1JJRF9WRVJTSU9OICIyLjUuMiIpCgptZXNzYWdlKFNUQVRVUyAiPj4+IEJ1aWxkaW5nIE5la29sdW5hUklEIFNjYW5uZXIgdiR7Q1JJRF9WRVJTSU9OfSIpCgojIOa3u+WKoCBjb21wb25lbnRzIOebruW9leS4uumineWklue7hOS7tgpzZXQoRVhUUkFfQ09NUE9ORU5UX0RJUlMgJHtDTUFLRV9DVVJSRU5UX1NPVVJDRV9ESVJ9L2NvbXBvbmVudHMpCgppbmNsdWRlKCRFTlZ7SURGX1BBVEh9L3Rvb2xzL2NtYWtlL3Byb2plY3QuY21ha2UpCnByb2plY3QocmVtb3RlaWRfc2Nhbm5lcikK
+cmake_minimum_required(VERSION 3.16)
+
+# ================================================================
+# RemoteID Scanner - NekolunaRID 无人机远程识别接收器
+# ================================================================
+#
+# 用法:
+#   idf.py --preview set-target esp32c5
+#   idf.py --preview build
+#
+# v1.3+ 结构说明:
+#   main/CMakeLists.txt  — 主组件(包装 main_rx 源码)
+#   main_rx/             — 主应用源码
+#   components/          — 子组件(lcd_display, crid_simulator 等)
+# ================================================================
+
+# v2.1.0: PTA 硬件共存 + GB46750 BLE 路径修复 + 删除 TDD
+set(CRID_VERSION "2.5.2")
+
+message(STATUS ">>> Building NekolunaRID Scanner v${CRID_VERSION}")
+
+# 添加 components 目录为额外组件
+set(EXTRA_COMPONENT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/components)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(remoteid_scanner)
