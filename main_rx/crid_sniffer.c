@@ -13,6 +13,8 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi_types.h"
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 
 #include "freertos/task.h"
 #include "crid_sniffer.h"
@@ -221,7 +223,7 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  周期 2.0 秒，ch6 占 75%，ch1/ch11 各占 12.5%。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 250, 250};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {800, 300, 300};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
@@ -236,7 +238,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1.5s / ch1,ch11 250ms (75%% ch6)");
+    snprintf(msg, sizeof(msg), "Channel rotation: ch6 800ms / ch1,ch11 300ms (57%% ch6)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -402,15 +404,41 @@ void crid_sniffer_start_channel_hold(void) {
         }
     }
     s_hold_should_stop = false;
+
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "ch_hold create: free_heap=%u internal_free=%u internal_largest=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    json_debug("RID_SNIFF", msg);
+
+    /* 优先内部 SRAM 栈；失败则尝试 PSRAM 栈（CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y）。
+     * ch_hold 任务不做 DMA、不做 SPI 传输，PSRAM 栈完全安全，延迟可忽略。 */
     BaseType_t ok = xTaskCreate(channel_hold_task, "ch_hold",
                 CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, &s_hold_task_handle);
+    if (ok == pdPASS) {
+        json_debug("RID_SNIFF", "ch_hold task created on internal SRAM (OK)");
+    }
     if (ok != pdPASS) {
-        char err[64];
-        snprintf(err, sizeof(err), "FATAL: ch_hold task create failed! free=%u internal=%u",
-                 (unsigned)esp_get_free_heap_size(),
+        snprintf(msg, sizeof(msg),
+                 "internal SRAM task create failed (free=%u), trying PSRAM stack",
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-        json_error("RID_SNIFF", err);
-        s_hold_task_handle = NULL;
+        json_warning("RID_SNIFF", msg);
+
+        ok = xTaskCreateWithCaps(channel_hold_task, "ch_hold",
+                CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO,
+                &s_hold_task_handle, MALLOC_CAP_SPIRAM);
+        if (ok != pdPASS) {
+            snprintf(msg, sizeof(msg),
+                     "FATAL: ch_hold task create failed on both SRAM and PSRAM! free=%u internal=%u",
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            json_error("RID_SNIFF", msg);
+            s_hold_task_handle = NULL;
+        } else {
+            json_debug("RID_SNIFF", "ch_hold task created on PSRAM stack (OK)");
+        }
     }
 }
 
