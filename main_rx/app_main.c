@@ -57,7 +57,7 @@
 #include "sim_core.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.5.3-detector"
+#define CRID_VERSION_STRING "2.5.4-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__

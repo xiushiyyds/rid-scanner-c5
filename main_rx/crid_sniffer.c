@@ -218,12 +218,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
  不再依赖应用层 TDD（v2.1.0 删除）。
 
- ch6 驻留 1500ms（多数无人机默认信道，75%占比），
- ch1/ch11 各驻留 250ms（覆盖非默认信道）。
- 周期 2.0 秒，ch6 占 75%，ch1/ch11 各占 12.5%。
+ ch6 驻留 1000ms（多数无人机默认信道，完整覆盖 1Hz 信标周期），
+ ch1/ch11 各驻留 400ms（覆盖非默认信道）。
+ 周期 1.8 秒，ch6 占 56%，ch1/ch11 各占 22%。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {800, 300, 300};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 400, 400};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
@@ -238,7 +238,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 800ms / ch1,ch11 300ms (57%% ch6)");
+    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1000ms / ch1,ch11 400ms (56%% ch6, period 1.8s)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
