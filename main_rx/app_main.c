@@ -58,7 +58,7 @@
 #include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.0-detector"
+#define CRID_VERSION_STRING "2.6.1"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -567,7 +567,7 @@ void app_main(void) {
              boot_mode == BOOT_MODE_SIMULATOR ? "SIMULATOR" : "DETECTOR");
 
     // ================================================================
-    // 模拟发射模式（v2.6.0：专属 LCD UI + 串口 CLI + 多品牌 + 多信道）
+    // 模拟发射模式（v2.6.1：300目标 + 省市两级选择 + 串口 CLI + 多品牌 + 多信道）
     // ================================================================
     if (boot_mode == BOOT_MODE_SIMULATOR) {
         // LCD 硬件已在 early_init 完成（framebuffer+SPI+背光），
@@ -579,15 +579,15 @@ void app_main(void) {
 
         sim_config_t sim_cfg;
         sim_get_default_config(&sim_cfg);
-        /* 默认参数：10 架、大连、MIXED 品牌、三信道轮发、5dBm */
-        sim_cfg.target_count = 10;
+        /* 默认参数：300 架、大连、MIXED 品牌、三信道轮发、20dBm */
+        sim_cfg.target_count = 300;
         sim_cfg.channel = 6;
         sim_cfg.tx_power = 20;
         sim_cfg.brand = SIM_BRAND_MIXED;
         sim_cfg.chan_mode = SIM_CHAN_ROTATE_1_6_11;
         sim_cfg.speed = 5.0f;
         sim_cfg.flight_mode = SIM_MODE_CIRCLE;
-        sim_cfg.frame_interval_ms = 5;
+        sim_cfg.frame_interval_ms = 3;
         sim_cfg.round_interval_ms = 1000;
 
         ESP_LOGI("RID_MAIN", "Starting simulator: %d targets brand=%s chan=%s",
@@ -605,7 +605,7 @@ void app_main(void) {
         sim_lcd_ui_start();
 
         // 打印 CLI 帮助
-        printf("\nRID Simulator v2.6.0 ready. Type 'help' for commands.\n\n");
+        printf("\nRID Simulator v2.6.1 ready. Type 'help' for commands.\n\n");
 
         // 主循环：从 UART0 (console) 读取 CLI 命令
         char cli_ch;

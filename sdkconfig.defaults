@@ -122,3 +122,12 @@ CONFIG_ESP_WIFI_NVS_ENABLED=y
 
 # DIO flash 模式（踩坑记录要求）
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# ================================================================
+# v2.6.1: FreeRTOS 1000Hz tick
+# 模拟器 300 目标需要毫秒级帧间隔（默认 3ms/帧），
+# 100Hz tick（10ms 粒度）会让 vTaskDelay 退化为 10ms，
+# 300 帧需 3s 才能发完，达不到 1Hz 信标速率。
+# 1000Hz 对 C5（240MHz 双核）开销可忽略。
+# ================================================================
+CONFIG_FREERTOS_HZ=1000

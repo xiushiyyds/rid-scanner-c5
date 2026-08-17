@@ -5,7 +5,7 @@
  * 扩展：DJI Beacon VID (OUI=26:37:12)
  *
  * v2.6.0 新增：
- *   - SIM_MAX_TARGETS 64 -> 120（300 架需要分批轮发，先稳 120）
+ *   - SIM_MAX_TARGETS 64 -> 300（v2.6.1）
  *   - 真实 SN 前缀库（117 条目，Crockford Base32 后缀）
  *   - 三信道轮发（ch1/6/11）
  *   - 串口 CLI 实时控制（count/speed/pause/resume/center/status/help）
@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define SIM_MAX_TARGETS 120
+#define SIM_MAX_TARGETS 300
 
 /* ================================================================
  * 模拟器工作模式
@@ -155,11 +155,29 @@ int sim_get_city_index(void);
 /* 城市表 */
 typedef struct {
     const char *name;       /* 城市中文名 */
+    const char *province;   /* 省份/直辖市 */
     double lat;
     double lon;
 } sim_city_t;
 
-#define SIM_CITY_COUNT 38
+#define SIM_CITY_COUNT 67
+#define SIM_PROVINCE_COUNT 31
+
+/* ================================================================
+ * 省/市两级选择 API（v2.6.1）
+ * 省份按 g_sim_cities 中首次出现顺序排列，索引 0..SIM_PROVINCE_COUNT-1。
+ * ================================================================ */
+const char *sim_get_province_name(int prov_idx);
+int  sim_get_province_count(void);
+/* 返回某省下第一个城市在 g_sim_cities 中的索引，无则 -1 */
+int  sim_province_first_city(int prov_idx);
+/* 返回某省的城市数量 */
+int  sim_province_city_count(int prov_idx);
+/* 把城市在某省范围内按 step 移动（+1 下一城市/-1 上一城市），
+ * 自动跨省循环，返回新的全局城市索引。 */
+int  sim_city_step_within_province(int city_idx, int step);
+/* 获取城市所属省份索引 */
+int  sim_city_province(int city_idx);
 
 #ifdef __cplusplus
 }

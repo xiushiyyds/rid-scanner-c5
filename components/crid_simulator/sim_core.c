@@ -1,8 +1,8 @@
 /**
- * sim_core.c — RID 伪造模拟器核心逻辑 v2.6.0
+ * sim_core.c — RID 伪造模拟器核心逻辑 v2.6.1
  *
  * 新增：
- *   - 120 目标上限
+ *   - 300 目标上限（v2.6.1）
  *   - 真实 SN 前缀库（Crockford Base32 后缀）
  *   - 多品牌：CRID / DJI / Autel / Parrot / Skydio / MIXED
  *   - 三信道轮发 ch1/6/11
@@ -139,23 +139,23 @@ const char *sim_chan_mode_name(sim_chan_mode_t m) {
 void sim_get_default_config(sim_config_t *config) {
     if (!config) return;
     memset(config, 0, sizeof(sim_config_t));
-    config->base_lat = g_sim_cities[8].lat;   /* 大连 */
-    config->base_lon = g_sim_cities[8].lon;
+    config->base_lat = g_sim_cities[12].lat;   /* 大连 */
+    config->base_lon = g_sim_cities[12].lon;
     config->altitude_msl = 50.0f;
     config->altitude_agl = 50.0f;
     config->speed = 5.0f;
     config->channel = 6;
     config->flight_mode = SIM_MODE_CIRCLE;
-    config->target_count = 10;
+    config->target_count = 300;
     config->tx_power = 20;
     strncpy(config->uas_id, "SIM-C5-001", sizeof(config->uas_id) - 1);
     strncpy(config->operator_id, "OP-C5-001", sizeof(config->operator_id) - 1);
     strncpy(config->ssid, "RID-SIM-C5", sizeof(config->ssid) - 1);
     config->brand = SIM_BRAND_MIXED;
     config->chan_mode = SIM_CHAN_ROTATE_1_6_11;
-    config->frame_interval_ms = 5;
+    config->frame_interval_ms = 3;
     config->round_interval_ms = 1000;
-    config->city_index = 8;
+    config->city_index = 12;
 }
 
 const char *sim_flight_mode_name(sim_flight_mode_t mode) {
@@ -366,7 +366,7 @@ static esp_err_t nvs_save_config(const sim_config_t *cfg) {
  * TX 任务（v2.6.0：暂停 + 多信道轮发 + 统计）
  * ================================================================ */
 static void sim_tx_task(void *arg) {
-    ESP_LOGI(TAG, "TX task started (v2.6.0)");
+    ESP_LOGI(TAG, "TX task started (v2.6.1)");
     uint8_t frame_buf[SIM_FRAME_BUF_SIZE];
     static const uint8_t ROTATE_CH[] = SIM_ROTATE_CHANNELS;
 
@@ -466,7 +466,7 @@ static void sim_tx_task(void *arg) {
  * ================================================================ */
 esp_err_t sim_init(void) {
     if (s_sim_state != SIM_STATE_IDLE) return ESP_OK;
-    ESP_LOGI(TAG, "Initializing simulator v2.6.0...");
+    ESP_LOGI(TAG, "Initializing simulator v2.6.1...");
 
     s_config_mutex = xSemaphoreCreateMutex();
     if (!s_config_mutex) return ESP_ERR_NO_MEM;
@@ -480,7 +480,7 @@ esp_err_t sim_init(void) {
 
     ESP_LOGI(TAG, "Init OK: default city=%s targets=%d brand=%s chan=%s",
              g_sim_cities[s_sim_config.city_index >= 0 && s_sim_config.city_index < SIM_CITY_COUNT
-                          ? s_sim_config.city_index : 8].name,
+                          ? s_sim_config.city_index : 12].name,
              s_sim_config.target_count,
              sim_brand_name(s_sim_config.brand),
              sim_chan_mode_name(s_sim_config.chan_mode));
@@ -721,12 +721,13 @@ void sim_set_chan_mode(sim_chan_mode_t mode) {
  * 串口 CLI
  * ================================================================ */
 static void cli_print_help(void) {
-    printf("\n=== RID Simulator CLI v2.6.0 ===\n");
+    printf("\n=== RID Simulator CLI v2.6.1 ===\n");
     printf("  status              - show status\n");
     printf("  count N             - set target count (1-%d)\n", SIM_MAX_TARGETS);
     printf("  speed X.X           - set speed m/s\n");
     printf("  center LAT LON      - set center coords\n");
     printf("  city N              - select city (0-%d, -1=list)\n", SIM_CITY_COUNT - 1);
+    printf("  province [N]        - list provinces, or jump to province N\n");
     printf("  channel N           - set single channel (1-13)\n");
     printf("  rotate              - enable ch1/6/11 rotation\n");
     printf("  brand NAME          - crid/dji/autel/parrot/skydio/mixed\n");
@@ -761,12 +762,29 @@ static void cli_print_status(void) {
 }
 
 static void cli_print_cities(void) {
-    printf("\n--- Cities ---\n");
+    printf("\n--- Cities (by province) ---\n");
+    const char *cur = NULL;
     for (int i = 0; i < SIM_CITY_COUNT; i++) {
-        printf("  %2d  %-10s  %.4f,%.4f\n", i, g_sim_cities[i].name,
+        if (cur == NULL || strcmp(g_sim_cities[i].province, cur) != 0) {
+            cur = g_sim_cities[i].province;
+            printf("  [%s]\n", cur);
+        }
+        printf("    %2d  %-8s  %.4f,%.4f\n", i, g_sim_cities[i].name,
                g_sim_cities[i].lat, g_sim_cities[i].lon);
     }
     printf("Use: city N to select\n\n");
+}
+
+static void cli_print_provinces(void) {
+    build_province_table();
+    printf("\n--- Provinces ---\n");
+    for (int i = 0; i < SIM_PROVINCE_COUNT; i++) {
+        int first = s_prov_first[i];
+        printf("  %2d  %-8s  %d city(ies), e.g. %s (idx %d)\n",
+               i, s_prov_names[i], s_prov_count_cnt[i],
+               g_sim_cities[first].name, first);
+    }
+    printf("Use: province N to jump to first city of province N\n\n");
 }
 
 bool sim_cli_handle_line(const char *line) {
@@ -820,6 +838,26 @@ bool sim_cli_handle_line(const char *line) {
             return true;
         }
         printf("Invalid city index. Use city -1 to list.\n");
+        return true;
+    }
+    if (strncmp(line, "province", 8) == 0) {
+        const char *arg = line + 8;
+        while (*arg == ' ' || *arg == '\t') arg++;
+        if (*arg == '\0') { cli_print_provinces(); return true; }
+        int pn;
+        if (sscanf(arg, "%d", &pn) == 1) {
+            build_province_table();
+            if (pn >= 0 && pn < SIM_PROVINCE_COUNT) {
+                int ci = s_prov_first[pn];
+                sim_set_city(ci);
+                printf("Province -> %s, first city %s (idx %d)\n",
+                       s_prov_names[pn], g_sim_cities[ci].name, ci);
+            } else {
+                printf("Invalid province (0-%d)\n", SIM_PROVINCE_COUNT - 1);
+            }
+        } else {
+            cli_print_provinces();
+        }
         return true;
     }
     if (strncmp(line, "brand ", 6) == 0) {
@@ -882,7 +920,7 @@ bool sim_get_target_info(int idx, char *sn_out, size_t sn_len,
 }
 
 /* 城市索引管理 */
-static int s_city_index = 8;
+static int s_city_index = 12;
 void sim_set_city(int idx) {
     if (idx < 0 || idx >= SIM_CITY_COUNT) return;
     s_city_index = idx;
@@ -894,3 +932,93 @@ void sim_set_city(int idx) {
     ESP_LOGI(TAG, "City -> %s", g_sim_cities[idx].name);
 }
 int sim_get_city_index(void) { return s_city_index; }
+
+/* ================================================================
+ * 省/市两级辅助（v2.6.1）
+ * 省份列表在首次扫描城市表时按出现顺序建立。
+ * ================================================================ */
+static const char *s_prov_names[SIM_PROVINCE_COUNT];
+static int s_prov_first[SIM_PROVINCE_COUNT];
+static int s_prov_count_cnt[SIM_PROVINCE_COUNT];
+static bool s_prov_built = false;
+
+static void build_province_table(void) {
+    if (s_prov_built) return;
+    int n = 0;
+    for (int i = 0; i < SIM_CITY_COUNT && n < SIM_PROVINCE_COUNT; i++) {
+        const char *p = g_sim_cities[i].province;
+        int k = -1;
+        for (int j = 0; j < n; j++) {
+            if (s_prov_names[j] == p) { k = j; break; } /* 指针比较，表内同名字符串需去重；安全起见也用 strcmp */
+        }
+        /* 字符串可能不是同一指针，用 strcmp 兜底 */
+        if (k < 0) {
+            for (int j = 0; j < n; j++) {
+                if (strcmp(s_prov_names[j], p) == 0) { k = j; break; }
+            }
+        }
+        if (k < 0) {
+            k = n++;
+            s_prov_names[k] = p;
+            s_prov_first[k] = i;
+            s_prov_count_cnt[k] = 0;
+        }
+        s_prov_count_cnt[k]++;
+    }
+    s_prov_built = true;
+}
+
+int sim_city_province(int city_idx) {
+    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) return -1;
+    build_province_table();
+    const char *p = g_sim_cities[city_idx].province;
+    for (int j = 0; j < SIM_PROVINCE_COUNT; j++) {
+        if (s_prov_names[j] && strcmp(s_prov_names[j], p) == 0) return j;
+    }
+    return -1;
+}
+
+const char *sim_get_province_name(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return "?";
+    return s_prov_names[prov_idx];
+}
+
+int sim_get_province_count(void) { build_province_table(); return SIM_PROVINCE_COUNT; }
+
+int sim_province_first_city(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return -1;
+    return s_prov_first[prov_idx];
+}
+
+int sim_province_city_count(int prov_idx) {
+    build_province_table();
+    if (prov_idx < 0 || prov_idx >= SIM_PROVINCE_COUNT) return 0;
+    return s_prov_count_cnt[prov_idx];
+}
+
+int sim_city_step_within_province(int city_idx, int step) {
+    if (city_idx < 0 || city_idx >= SIM_CITY_COUNT) city_idx = 0;
+    int prov = sim_city_province(city_idx);
+    if (prov < 0) return city_idx;
+    int first = s_prov_first[prov];
+    int cnt = s_prov_count_cnt[prov];
+    int last = first + cnt - 1;
+    int next = city_idx + step;
+    if (step > 0) {
+        if (next > last) {
+            /* 跳到下一省第一个城市；到末尾回到 0 */
+            int np = prov + 1;
+            if (np >= SIM_PROVINCE_COUNT) np = 0;
+            next = s_prov_first[np];
+        }
+    } else if (step < 0) {
+        if (next < first) {
+            int np = prov - 1;
+            if (np < 0) np = SIM_PROVINCE_COUNT - 1;
+            next = s_prov_first[np] + s_prov_count_cnt[np] - 1;
+        }
+    }
+    return next;
+}
