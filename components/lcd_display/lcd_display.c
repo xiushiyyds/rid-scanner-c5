@@ -1388,7 +1388,7 @@ boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
             fb_text_center(226, buf, C_GRAY);
 
             /* 版本 */
-            fb_text_center(280, "v2.5.5", C_DIM);
+            fb_text_center(280, "v2.6.0", C_DIM);
 
             flush_framebuffer();
         }
@@ -1468,6 +1468,16 @@ int lcd_display_init(void)
     return 0;
 }
 
+/* 模拟器模式专用：只初始化 PMIC，不启动侦测页刷新/按键任务。
+ * framebuffer + SPI + 背光已由 early_init 完成。 */
+int lcd_display_init_for_sim(void)
+{
+    ESP_LOGI(TAG, "=== LCD 初始化（模拟器模式）===");
+    if (!s_hw_inited) return -1;
+    axp2602_init();
+    return 0;
+}
+
 void lcd_display_set_source(uav_track_t *t, void *m, int n) {
     s_tracker = t; s_tracker_mutex = m; s_max_uavs = n;
 }
@@ -1491,3 +1501,16 @@ int lcd_display_get_battery_voltage(uint16_t *v) {
     if (v) *v = (uint16_t)mv;
     return 0;
 }
+
+/* ================================================================
+ * 模拟器 UI 访问接口（v2.6.0）
+ * 给 sim_lcd_ui.c 使用，不创建自己的 framebuffer，复用同一块 s_fb。
+ * ================================================================ */
+uint16_t *lcd_get_framebuffer(void) { return s_fb; }
+void lcd_flush(void) { flush_framebuffer(); }
+void lcd_fb_fill(uint16_t c) { fb_fill(c); }
+void lcd_fb_fillrect(int x, int y, int w, int h, uint16_t c) { fb_fillrect(x, y, w, h, c); }
+void lcd_fb_text(int x, int y, const char *s, uint16_t c) { fb_text(x, y, s, c); }
+void lcd_fb_text_center(int y, const char *s, uint16_t c) { fb_text_center(y, s, c); }
+void lcd_fb_text_right(int xr, int y, const char *s, uint16_t c) { fb_text_right(xr, y, s, c); }
+uint16_t lcd_rgb565(uint8_t r, uint8_t g, uint8_t b) { return rgb565(r, g, b); }

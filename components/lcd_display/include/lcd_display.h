@@ -107,6 +107,9 @@ int lcd_display_early_init(void);
  * ================================================================ */
 int lcd_display_init(void);
 
+/* 模拟器模式专用：只初始化 PMIC，不启动侦测页刷新/按键任务 */
+int lcd_display_init_for_sim(void);
+
 void lcd_display_set_source(uav_track_t *tracker_table,
                             void *tracker_mutex,
                             int max_uavs);
@@ -135,3 +138,16 @@ void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb);
 #endif
 
 #endif // LCD_DISPLAY_H
+
+/* ================================================================
+ * 模拟器 UI 底层访问接口（v2.6.0，供 sim_lcd_ui.c 使用）
+ * ================================================================ */
+#include <stdint.h>
+uint16_t *lcd_get_framebuffer(void);
+void lcd_flush(void);
+void lcd_fb_fill(uint16_t c);
+void lcd_fb_fillrect(int x, int y, int w, int h, uint16_t c);
+void lcd_fb_text(int x, int y, const char *s, uint16_t c);
+void lcd_fb_text_center(int y, const char *s, uint16_t c);
+void lcd_fb_text_right(int xr, int y, const char *s, uint16_t c);
+uint16_t lcd_rgb565(uint8_t r, uint8_t g, uint8_t b);

@@ -55,9 +55,10 @@
 #include "dji_droneid.h"
 #include "evlog.h"
 #include "sim_core.h"
+#include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.5.5-detector"
+#define CRID_VERSION_STRING "2.6.0-detector"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -566,26 +567,33 @@ void app_main(void) {
              boot_mode == BOOT_MODE_SIMULATOR ? "SIMULATOR" : "DETECTOR");
 
     // ================================================================
-    // 模拟发射模式
+    // 模拟发射模式（v2.6.0：专属 LCD UI + 串口 CLI + 多品牌 + 多信道）
     // ================================================================
     if (boot_mode == BOOT_MODE_SIMULATOR) {
-        // 完整 LCD 初始化（跳过硬件部分，已 early_init）
-        if (lcd_display_init() == 0) {
-            json_debug("RID_MAIN", "LCD ready (simulator mode)");
-        }
+        // LCD 硬件已在 early_init 完成（framebuffer+SPI+背光），
+        // 这里只初始化 PMIC，不启动侦测页的刷新/按键任务（模拟器有自己的 UI）。
+        lcd_display_init_for_sim();
 
-        // 初始化模拟器
+        // 初始化模拟器（从 NVS 加载上次配置）
         sim_init();
 
         sim_config_t sim_cfg;
         sim_get_default_config(&sim_cfg);
-        sim_cfg.target_count = 64;
+        /* 默认参数：10 架、大连、MIXED 品牌、三信道轮发、5dBm */
+        sim_cfg.target_count = 10;
         sim_cfg.channel = 6;
         sim_cfg.tx_power = 20;
-        strncpy(sim_cfg.uas_id, "SIM-C5-", sizeof(sim_cfg.uas_id) - 1);
+        sim_cfg.brand = SIM_BRAND_MIXED;
+        sim_cfg.chan_mode = SIM_CHAN_ROTATE_1_6_11;
+        sim_cfg.speed = 5.0f;
+        sim_cfg.flight_mode = SIM_MODE_CIRCLE;
+        sim_cfg.frame_interval_ms = 5;
+        sim_cfg.round_interval_ms = 1000;
 
-        ESP_LOGI("RID_MAIN", "Starting simulator: %d targets on ch%d",
-                 sim_cfg.target_count, sim_cfg.channel);
+        ESP_LOGI("RID_MAIN", "Starting simulator: %d targets brand=%s chan=%s",
+                 sim_cfg.target_count,
+                 sim_brand_name(sim_cfg.brand),
+                 sim_chan_mode_name(sim_cfg.chan_mode));
 
         ret = sim_start(&sim_cfg);
         if (ret != ESP_OK) {
@@ -593,12 +601,22 @@ void app_main(void) {
             return;
         }
 
-        // 模拟模式主循环：定期打印发射统计
+        // 启动专属 LCD UI
+        sim_lcd_ui_start();
+
+        // 打印 CLI 帮助
+        printf("\nRID Simulator v2.6.0 ready. Type 'help' for commands.\n\n");
+
+        // 主循环：从 UART0 (console) 读取 CLI 命令
+        char cli_ch;
         while (1) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            ESP_LOGI("RID_MAIN", "SIM running: tx_count=%lu, state=%d",
-                     (unsigned long)sim_get_tx_count(),
-                     (int)sim_get_state());
+            int n = fread(&cli_ch, 1, 1, stdin);
+            if (n > 0) {
+                putchar(cli_ch);  // 回显
+                sim_cli_feed(&cli_ch, 1);
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
         }
         /* 不会到达这里 */
     }
