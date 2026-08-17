@@ -89,7 +89,9 @@ static int s_list_scroll = 0;
 typedef struct {
     bool user_was_low;
     bool boot_was_low;
+    uint32_t user_down_ms;
     uint32_t boot_down_ms;
+    bool user_long_fired;
     bool boot_long_fired;
 } btn_state_t;
 
@@ -105,21 +107,26 @@ static void config_buttons(void) {
 }
 
 /* ================================================================
- * 设置项调整
+ * 设置项调整（v2.6.2：A减 B加，目标数用预设档位）
  * ================================================================ */
 static void adjust_setting(setting_item_t item, bool forward) {
-    sim_config_t cfg;
-    /* 读当前配置：从 stats 拿不全，直接用 get_default + 手动覆盖 */
     sim_stats_t st;
     sim_get_stats(&st);
 
     switch (item) {
     case SET_COUNT: {
+        /* 预设档位，长按短按都循环：10/20/50/100/150/200/250/300 */
+        static const int levels[] = {10, 20, 50, 100, 150, 200, 250, 300};
+        int n = (int)(sizeof(levels) / sizeof(levels[0]));
         int cur = st.active_count;
-        if (forward) cur += 10; else cur -= 10;
-        if (cur < 1) cur = 1;
-        if (cur > SIM_MAX_TARGETS) cur = SIM_MAX_TARGETS;
-        sim_set_count(cur);
+        int idx = 0;
+        for (int k = 0; k < n; k++) {
+            if (levels[k] >= cur) { idx = k; break; }
+            idx = k;
+        }
+        if (forward) idx = (idx + 1) % n;
+        else         idx = (idx - 1 + n) % n;
+        sim_set_count(levels[idx]);
         break;
     }
     case SET_SPEED: {
@@ -131,7 +138,7 @@ static void adjust_setting(setting_item_t item, bool forward) {
         break;
     }
     case SET_CITY: {
-        /* B 短按：在当前省内切换城市，跨省循环 */
+        /* 在当前省内切换城市，跨省循环 */
         int ci = sim_get_city_index();
         ci = sim_city_step_within_province(ci, forward ? 1 : -1);
         s_city_prov = sim_city_province(ci);
@@ -251,8 +258,8 @@ static void draw_status_page(void) {
 
     /* 底部提示 */
     draw_bar(LCD_HEIGHT - 24, UI_DIM);
-    lcd_fb_text_center(LCD_HEIGHT - 18, "A翻页 B暂停", UI_GRAY);
-    lcd_fb_text(4, LCD_HEIGHT - 40, "v2.6.0", UI_DIM);
+    lcd_fb_text_center(LCD_HEIGHT - 18, "A翻页 B暂停 长按B设置", UI_GRAY);
+    lcd_fb_text(4, LCD_HEIGHT - 40, "v2.6.2", UI_DIM);
 }
 
 static void draw_targets_page(void) {
@@ -352,7 +359,7 @@ static void draw_settings_page(void) {
     if (s_city_edit && s_setting_sel == SET_CITY)
         lcd_fb_text_right(LCD_WIDTH - 4, 4, "A省 B市", UI_YELLOW);
     else
-        lcd_fb_text_right(LCD_WIDTH - 4, 4, "A切换 B调", UI_GRAY);
+        lcd_fb_text_right(LCD_WIDTH - 4, 4, "A减/切项 B加", UI_GRAY);
     draw_bar(24, UI_CYAN);
 
     int y = 34;
@@ -374,18 +381,19 @@ static void draw_settings_page(void) {
 
     draw_bar(LCD_HEIGHT - 24, UI_DIM);
     if (s_city_edit && s_setting_sel == SET_CITY)
-        lcd_fb_text_center(LCD_HEIGHT - 18, "A切省 B切市 长按退出", UI_GRAY);
+        lcd_fb_text_center(LCD_HEIGHT - 18, "A切省 B切市 长按B退出", UI_GRAY);
     else
-        lcd_fb_text_center(LCD_HEIGHT - 18, "B长按退出", UI_GRAY);
+        lcd_fb_text_center(LCD_HEIGHT - 18, "A减/长按切项 B加/长按退出", UI_GRAY);
 }
 
 static void draw_about_page(void) {
     lcd_fb_fill(UI_BG);
     lcd_fb_text_center(60, "RID 模拟发射", UI_CYAN);
-    lcd_fb_text_center(86, "v2.6.1", UI_WHITE);
+    lcd_fb_text_center(86, "v2.6.2", UI_WHITE);
     lcd_fb_text_center(120, "GB42590 + DJI", UI_GRAY);
     lcd_fb_text_center(140, "多品牌 多信道", UI_GRAY);
     lcd_fb_text_center(160, "300目标 省市选择", UI_GRAY);
+    lcd_fb_text_center(180, "信道分组轮发", UI_GRAY);
     lcd_fb_text_center(200, "ESP32-C5", UI_DIM);
     lcd_fb_text_center(220, "LILYGO T-Display", UI_DIM);
     lcd_fb_text_center(LCD_HEIGHT - 30, "A返回", UI_GRAY);
@@ -412,7 +420,17 @@ static void ui_refresh_task(void *arg) {
 }
 
 /* ================================================================
- * 按键任务
+ * 按键任务（v2.6.2：设置页 A减/B加，长按 A 切设置项）
+ *
+ * 运行页：
+ *   A 短按：循环翻页
+ *   B 短按：暂停/恢复
+ *   B 长按：进设置
+ * 设置页：
+ *   A 短按：数值项 -1档 / 城市切省 / 枚举项后退
+ *   A 长按：切换设置项（城市子模式下切省，不切项）
+ *   B 短按：数值项 +1档 / 城市切市 / 枚举项前进
+ *   B 长按：城市子模式下退出子模式；否则退回状态页
  * ================================================================ */
 static void button_task(void *arg) {
     (void)arg;
@@ -424,33 +442,51 @@ static void button_task(void *arg) {
         int user_lvl = gpio_get_level(BTN_USER_PIN);
         int boot_lvl = gpio_get_level(BTN_BOOT_PIN);
 
-        /* A 键：短按切换 */
+        /* A 键 */
         if (user_lvl == 0) {
-            bs.user_was_low = true;
-        } else if (bs.user_was_low) {
-            bs.user_was_low = false;
-            if (s_page == PAGE_SETTINGS) {
-                if (s_city_edit && s_setting_sel == SET_CITY) {
-                    /* 城市子模式：A 切换省份（跳到该省第一个城市） */
-                    int np = s_city_prov + 1;
-                    if (np >= sim_get_province_count()) np = 0;
-                    s_city_prov = np;
-                    int ci = sim_province_first_city(np);
-                    sim_set_city(ci);
-                } else if (s_setting_sel == SET_CITY) {
-                    /* 首次按 A：进入城市编辑子模式 */
-                    s_city_edit = true;
-                    s_city_prov = sim_city_province(sim_get_city_index());
-                } else {
+            if (!bs.user_was_low) {
+                bs.user_was_low = true;
+                bs.user_down_ms = now;
+                bs.user_long_fired = false;
+            } else if (!bs.user_long_fired && (now - bs.user_down_ms >= BTN_LONG_MS)) {
+                bs.user_long_fired = true;
+                /* A 长按：
+                 * - 设置页且城市子模式：不处理（城市子模式用 B 长按退出）
+                 * - 设置页：切换设置项
+                 * - 其他页：忽略 */
+                if (s_page == PAGE_SETTINGS &&
+                    !(s_city_edit && s_setting_sel == SET_CITY)) {
                     s_city_edit = false;
                     s_setting_sel = (setting_item_t)((s_setting_sel + 1) % SET_COUNT_ITEMS);
                 }
-            } else {
-                s_page = (ui_page_t)((s_page + 1) % PAGE_COUNT);
+            }
+        } else if (bs.user_was_low) {
+            bs.user_was_low = false;
+            if (!bs.user_long_fired) {
+                /* A 短按 */
+                if (s_page == PAGE_SETTINGS) {
+                    if (s_city_edit && s_setting_sel == SET_CITY) {
+                        /* 城市子模式：A 切省（跳到该省第一个城市） */
+                        int np = s_city_prov + 1;
+                        if (np >= sim_get_province_count()) np = 0;
+                        s_city_prov = np;
+                        int ci = sim_province_first_city(np);
+                        sim_set_city(ci);
+                    } else if (s_setting_sel == SET_CITY) {
+                        /* 首次按 A：进入城市编辑子模式 */
+                        s_city_edit = true;
+                        s_city_prov = sim_city_province(sim_get_city_index());
+                    } else {
+                        /* 数值项/枚举项：A 短按 = 后退/减 */
+                        adjust_setting(s_setting_sel, false);
+                    }
+                } else {
+                    s_page = (ui_page_t)((s_page + 1) % PAGE_COUNT);
+                }
             }
         }
 
-        /* B 键：短按确认/暂停，长按退出设置 */
+        /* B 键 */
         if (boot_lvl == 0) {
             if (!bs.boot_was_low) {
                 bs.boot_was_low = true;
@@ -458,7 +494,6 @@ static void button_task(void *arg) {
                 bs.boot_long_fired = false;
             } else if (!bs.boot_long_fired && (now - bs.boot_down_ms >= BTN_LONG_MS)) {
                 bs.boot_long_fired = true;
-                /* 长按：城市子模式先退出子模式；否则设置页退回状态页 */
                 if (s_page == PAGE_SETTINGS) {
                     if (s_city_edit && s_setting_sel == SET_CITY) {
                         s_city_edit = false;
@@ -466,15 +501,20 @@ static void button_task(void *arg) {
                         s_city_edit = false;
                         s_page = PAGE_STATUS;
                     }
+                } else {
+                    /* 非设置页长按 B：进入设置 */
+                    s_city_edit = false;
+                    s_setting_sel = SET_COUNT;
+                    s_page = PAGE_SETTINGS;
                 }
             }
         } else if (bs.boot_was_low) {
             bs.boot_was_low = false;
             if (!bs.boot_long_fired) {
-                /* 短按 */
+                /* B 短按 */
                 if (s_page == PAGE_SETTINGS) {
                     if (s_setting_sel == SET_CITY) {
-                        /* 城市项：B 短按在省内切市（自动进入子模式） */
+                        /* 城市项：B 短按切市（自动进入子模式） */
                         s_city_edit = true;
                         if (s_city_prov < 0)
                             s_city_prov = sim_city_province(sim_get_city_index());

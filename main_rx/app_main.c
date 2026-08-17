@@ -58,7 +58,7 @@
 #include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.1"
+#define CRID_VERSION_STRING "2.6.2"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -605,7 +605,7 @@ void app_main(void) {
         sim_lcd_ui_start();
 
         // 打印 CLI 帮助
-        printf("\nRID Simulator v2.6.1 ready. Type 'help' for commands.\n\n");
+        printf("\nRID Simulator v2.6.2 ready. Type 'help' for commands.\n\n");
 
         // 主循环：从 UART0 (console) 读取 CLI 命令
         char cli_ch;

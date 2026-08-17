@@ -363,10 +363,51 @@ static esp_err_t nvs_save_config(const sim_config_t *cfg) {
 }
 
 /* ================================================================
- * TX 任务（v2.6.0：暂停 + 多信道轮发 + 统计）
+ * TX 任务（v2.6.2：信道分组轮发，避免逐架切信道）
+ *
+ * v2.6.0/v2.6.1 在 ROTATE 模式下对每个目标都调用 esp_wifi_set_channel，
+ * 300 架 = 300 次切信道，每次 1~5ms，整轮被拖到 1.5~2.5s。
+ * 本版按 init_targets() 里同样的 i%3 分组规则，把同一信道的目标
+ * 集中在一个分组里连续发送，每轮只切 2 次信道。
  * ================================================================ */
+
+/* 发送单个目标的一帧（已持锁/不持锁由调用方决定），成功返回 true */
+static inline bool tx_send_one(int i, uint8_t *frame_buf) {
+    sim_target_t *t = &s_targets[i];
+    double lat, lon;
+    float heading;
+    sim_patrol_next(i, &lat, &lon, &heading);
+    t->current_lat = lat;
+    t->current_lon = lon;
+    t->current_heading = heading;
+
+    if (s_config_mutex) xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+    build_target_encode_config(t, &s_sim_config, lat, lon, heading,
+                               s_sim_config.speed);
+    float alt_wave = 3.0f * sinf((float)(s_tx_count + i * 7) * 0.1f);
+    t->encode_cfg.altitude_msl += alt_wave;
+    t->encode_cfg.altitude_agl += alt_wave;
+    float spd_wave = 0.9f + 0.1f * sinf((float)(s_tx_count + i * 13) * 0.05f);
+    t->encode_cfg.speed_horizontal *= spd_wave;
+    if (s_config_mutex) xSemaphoreGive(s_config_mutex);
+
+    if (i == 0) {
+        s_current_lat = lat;
+        s_current_lon = lon;
+        s_current_heading = heading;
+    }
+
+    uint16_t frame_len = 0;
+    uint8_t mc = s_msg_counter++;
+    if (!sim_encode_beacon_frame(&t->encode_cfg, mc, frame_buf,
+                                  SIM_FRAME_BUF_SIZE, &frame_len)) {
+        return false;
+    }
+    return sim_wifi_send_raw_frame(frame_buf, frame_len) == ESP_OK;
+}
+
 static void sim_tx_task(void *arg) {
-    ESP_LOGI(TAG, "TX task started (v2.6.1)");
+    ESP_LOGI(TAG, "TX task started (v2.6.2 grouped rotate)");
     uint8_t frame_buf[SIM_FRAME_BUF_SIZE];
     static const uint8_t ROTATE_CH[] = SIM_ROTATE_CHANNELS;
 
@@ -392,58 +433,36 @@ static void sim_tx_task(void *arg) {
 
         TickType_t round_start = xTaskGetTickCount();
 
-        for (int i = 0; i < count && !s_tx_should_stop; i++) {
-            if (s_tx_paused) break;
-
-            sim_target_t *t = &s_targets[i];
-            double lat, lon;
-            float heading;
-            sim_patrol_next(i, &lat, &lon, &heading);
-            t->current_lat = lat;
-            t->current_lon = lon;
-            t->current_heading = heading;
-
-            if (s_config_mutex) xSemaphoreTake(s_config_mutex, portMAX_DELAY);
-            build_target_encode_config(t, &s_sim_config, lat, lon, heading,
-                                       s_sim_config.speed);
-            float alt_wave = 3.0f * sinf((float)(s_tx_count + i * 7) * 0.1f);
-            t->encode_cfg.altitude_msl += alt_wave;
-            t->encode_cfg.altitude_agl += alt_wave;
-            float spd_wave = 0.9f + 0.1f * sinf((float)(s_tx_count + i * 13) * 0.05f);
-            t->encode_cfg.speed_horizontal *= spd_wave;
-            if (s_config_mutex) xSemaphoreGive(s_config_mutex);
-
-            if (i == 0) {
-                s_current_lat = lat;
-                s_current_lon = lon;
-                s_current_heading = heading;
+        if (chan_mode == SIM_CHAN_ROTATE_1_6_11) {
+            /* 分组轮发：ch6 组 (i%3==0) -> ch1 组 (i%3==1) -> ch11 组 (i%3==2)
+             * 与 init_targets() 中 t->channel = chs[i%3] 的分配严格一致 */
+            for (int g = 0; g < SIM_ROTATE_CH_COUNT && !s_tx_should_stop; g++) {
+                if (s_tx_paused) break;
+                uint8_t ch = ROTATE_CH[g];
+                if (s_current_channel != ch) {
+                    sim_wifi_set_channel(ch);
+                    s_current_channel = ch;
+                }
+                for (int i = g; i < count; i += SIM_ROTATE_CH_COUNT) {
+                    if (s_tx_paused || s_tx_should_stop) break;
+                    if (tx_send_one(i, frame_buf)) s_tx_count++;
+                    else s_tx_fail++;
+                    vTaskDelay(pdMS_TO_TICKS(frame_interval));
+                }
             }
-
-            /* 信道切换：轮发模式下每个目标可能在不同信道 */
-            if (chan_mode == SIM_CHAN_ROTATE_1_6_11) {
-                uint8_t ch = ROTATE_CH[i % SIM_ROTATE_CH_COUNT];
+        } else {
+            /* 单信道：只在开始时切一次 */
+            uint8_t ch = s_sim_config.channel;
+            if (s_current_channel != ch) {
                 sim_wifi_set_channel(ch);
                 s_current_channel = ch;
-            } else {
-                if (s_current_channel != t->channel) {
-                    sim_wifi_set_channel(t->channel);
-                    s_current_channel = t->channel;
-                }
             }
-
-            uint16_t frame_len = 0;
-            uint8_t mc = s_msg_counter++;
-            if (sim_encode_beacon_frame(&t->encode_cfg, mc, frame_buf,
-                                         SIM_FRAME_BUF_SIZE, &frame_len)) {
-                if (sim_wifi_send_raw_frame(frame_buf, frame_len) == ESP_OK) {
-                    s_tx_count++;
-                } else {
-                    s_tx_fail++;
-                }
-            } else {
-                s_tx_fail++;
+            for (int i = 0; i < count && !s_tx_should_stop; i++) {
+                if (s_tx_paused) break;
+                if (tx_send_one(i, frame_buf)) s_tx_count++;
+                else s_tx_fail++;
+                vTaskDelay(pdMS_TO_TICKS(frame_interval));
             }
-            vTaskDelay(pdMS_TO_TICKS(frame_interval));
         }
 
         s_rounds++;
@@ -466,7 +485,7 @@ static void sim_tx_task(void *arg) {
  * ================================================================ */
 esp_err_t sim_init(void) {
     if (s_sim_state != SIM_STATE_IDLE) return ESP_OK;
-    ESP_LOGI(TAG, "Initializing simulator v2.6.1...");
+    ESP_LOGI(TAG, "Initializing simulator v2.6.2...");
 
     s_config_mutex = xSemaphoreCreateMutex();
     if (!s_config_mutex) return ESP_ERR_NO_MEM;
@@ -812,7 +831,7 @@ int sim_city_step_within_province(int city_idx, int step) {
  * 串口 CLI
  * ================================================================ */
 static void cli_print_help(void) {
-    printf("\n=== RID Simulator CLI v2.6.1 ===\n");
+    printf("\n=== RID Simulator CLI v2.6.2 ===\n");
     printf("  status              - show status\n");
     printf("  count N             - set target count (1-%d)\n", SIM_MAX_TARGETS);
     printf("  speed X.X           - set speed m/s\n");
