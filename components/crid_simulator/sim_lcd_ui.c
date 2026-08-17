@@ -181,7 +181,7 @@ static void draw_status_page(void) {
     switch (st.state) {
         case SIM_STATE_RUNNING: state_str = "发射中"; state_color = UI_GREEN; break;
         case SIM_STATE_PAUSED:  state_str = "已暂停"; state_color = UI_YELLOW; break;
-        case SIM_STATE_STOPPED: state_str = "已停止"; state_color = UI_RED; break;
+        case SIM_STATE_STOPPED: state_str = "待机";   state_color = UI_CYAN; break;
         default: break;
     }
 
@@ -258,7 +258,10 @@ static void draw_status_page(void) {
 
     /* 底部提示 */
     draw_bar(LCD_HEIGHT - 24, UI_DIM);
-    lcd_fb_text_center(LCD_HEIGHT - 18, "A翻页 B暂停 长按B设置", UI_GRAY);
+    if (st.state == SIM_STATE_STOPPED)
+        lcd_fb_text_center(LCD_HEIGHT - 18, "B启动  A翻页 长按B设置", UI_YELLOW);
+    else
+        lcd_fb_text_center(LCD_HEIGHT - 18, "A翻页 B暂停 长按B设置", UI_GRAY);
     lcd_fb_text(4, LCD_HEIGHT - 40, "v2.6.2", UI_DIM);
 }
 
@@ -523,11 +526,16 @@ static void button_task(void *arg) {
                         adjust_setting(s_setting_sel, true);
                     }
                 } else {
-                    /* 暂停/恢复 */
-                    if (sim_get_state() == SIM_STATE_RUNNING)
+                    /* 状态/列表/关于页：启动 / 暂停 / 恢复 */
+                    sim_state_t st_now = sim_get_state();
+                    if (st_now == SIM_STATE_STOPPED || st_now == SIM_STATE_IDLE) {
+                        /* 从待机启动：传入 NULL 沿用 sim_init 时加载的 NVS 配置 */
+                        sim_start(NULL);
+                    } else if (st_now == SIM_STATE_RUNNING) {
                         sim_pause();
-                    else if (sim_get_state() == SIM_STATE_PAUSED)
+                    } else if (st_now == SIM_STATE_PAUSED) {
                         sim_resume();
+                    }
                 }
             }
         }

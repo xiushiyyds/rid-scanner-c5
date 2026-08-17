@@ -842,6 +842,7 @@ static void cli_print_help(void) {
     printf("  rotate              - enable ch1/6/11 rotation\n");
     printf("  brand NAME          - crid/dji/autel/parrot/skydio/mixed\n");
     printf("  pause / resume      - pause/resume TX\n");
+    printf("  start               - start TX from standby\n");
     printf("  stop                - stop simulator\n");
     printf("  help                - this help\n");
     printf("================================\n\n");
@@ -914,6 +915,19 @@ bool sim_cli_handle_line(const char *line) {
     }
     if (strncmp(line, "resume", 6) == 0) {
         sim_resume(); return true;
+    }
+    if (strncmp(line, "start", 5) == 0) {
+        /* 从待机启动；已在运行/暂停时分别返回错误或提示 */
+        sim_state_t s = sim_get_state();
+        if (s == SIM_STATE_STOPPED || s == SIM_STATE_IDLE) {
+            esp_err_t e = sim_start(NULL);
+            printf("start -> %s\n", esp_err_to_name(e));
+        } else if (s == SIM_STATE_PAUSED) {
+            sim_resume();
+        } else {
+            printf("already running\n");
+        }
+        return true;
     }
     if (strncmp(line, "stop", 4) == 0) {
         sim_stop(); return true;

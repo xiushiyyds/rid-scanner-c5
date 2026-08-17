@@ -55,6 +55,7 @@
 #include "dji_droneid.h"
 #include "evlog.h"
 #include "sim_core.h"
+#include "sim_cities.h"
 #include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
@@ -567,19 +568,20 @@ void app_main(void) {
              boot_mode == BOOT_MODE_SIMULATOR ? "SIMULATOR" : "DETECTOR");
 
     // ================================================================
-    // 模拟发射模式（v2.6.1：300目标 + 省市两级选择 + 串口 CLI + 多品牌 + 多信道）
+    // 模拟发射模式（v2.6.2：开机只初始化不发射，按 B 启动）
     // ================================================================
     if (boot_mode == BOOT_MODE_SIMULATOR) {
         // LCD 硬件已在 early_init 完成（framebuffer+SPI+背光），
         // 这里只初始化 PMIC，不启动侦测页的刷新/按键任务（模拟器有自己的 UI）。
         lcd_display_init_for_sim();
 
-        // 初始化模拟器（从 NVS 加载上次配置）
+        // 初始化模拟器（内部会从 NVS 加载上次配置）
         sim_init();
 
+        /* 写入默认参数（300 架、大连、MIXED、三信道、20dBm）。
+         * 不立即 sim_start()——等用户在 LCD 上按 B 启动，避免一上电就发射。 */
         sim_config_t sim_cfg;
         sim_get_default_config(&sim_cfg);
-        /* 默认参数：300 架、大连、MIXED 品牌、三信道轮发、20dBm */
         sim_cfg.target_count = 300;
         sim_cfg.channel = 6;
         sim_cfg.tx_power = 20;
@@ -589,19 +591,14 @@ void app_main(void) {
         sim_cfg.flight_mode = SIM_MODE_CIRCLE;
         sim_cfg.frame_interval_ms = 3;
         sim_cfg.round_interval_ms = 1000;
+        /* 城市索引 -> 坐标 */
+        sim_cfg.base_lat = g_sim_cities[sim_cfg.city_index].lat;
+        sim_cfg.base_lon = g_sim_cities[sim_cfg.city_index].lon;
+        sim_update_config(&sim_cfg);
 
-        ESP_LOGI("RID_MAIN", "Starting simulator: %d targets brand=%s chan=%s",
-                 sim_cfg.target_count,
-                 sim_brand_name(sim_cfg.brand),
-                 sim_chan_mode_name(sim_cfg.chan_mode));
+        ESP_LOGI("RID_MAIN", "Simulator armed (not transmitting). Press B on LCD to start.");
 
-        ret = sim_start(&sim_cfg);
-        if (ret != ESP_OK) {
-            ESP_LOGE("RID_MAIN", "sim_start failed: %s", esp_err_to_name(ret));
-            return;
-        }
-
-        // 启动专属 LCD UI
+        // 启动专属 LCD UI（UI 会显示"待机"，按 B 启动 sim_start(NULL)）
         sim_lcd_ui_start();
 
         // 打印 CLI 帮助
