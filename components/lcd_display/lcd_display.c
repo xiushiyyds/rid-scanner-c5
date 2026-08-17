@@ -1388,7 +1388,7 @@ boot_mode_t lcd_boot_menu(uint32_t timeout_ms)
             fb_text_center(226, buf, C_GRAY);
 
             /* 版本 */
-            fb_text_center(280, "v2.5.4", C_DIM);
+            fb_text_center(280, "v2.5.5", C_DIM);
 
             flush_framebuffer();
         }

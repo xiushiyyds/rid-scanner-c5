@@ -264,6 +264,13 @@ static void channel_hold_task(void *pvParameter) {
         }
         idx = (idx + 1) % SCAN_CHANNEL_COUNT;
 
+        /* 每次切换都打印当前信道，方便串口确认轮巡在跑 */
+        uint8_t actual_ch = 0;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&actual_ch, &second);
+        snprintf(msg, sizeof(msg), "ch -> %d (actual=%d) dwell=%ums", ch, actual_ch, dwell);
+        json_debug("RID_SNIFF", msg);
+
         /* 分段 delay，stop 时能快速退出 */
         for (int i = 0; i < (dwell / 50) && !s_hold_should_stop; i++) {
             vTaskDelay(pdMS_TO_TICKS(50));
