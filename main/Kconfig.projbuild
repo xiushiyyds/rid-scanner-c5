@@ -1,0 +1,23 @@
+# Kconfig.projbuild — 构建模式选择
+#
+# RID_SCANNER_BUILD_SIMULATOR=n (默认): 纯侦测构建
+#   - crid_simulator 组件不参与编译链接
+#   - 开机直接进入侦测模式（或显示侦测启动画面）
+#   - 二进制最小，WiFi/BLE 共存最稳定
+#
+# RID_SCANNER_BUILD_SIMULATOR=y: 模拟发射构建
+#   - 编译 crid_simulator 组件
+#   - 开机显示菜单可选择模拟发射模式
+#   - 适用于第二块板（S3 或 C5）做信号源
+
+menu "RID Scanner Build Options"
+
+    config RID_SCANNER_BUILD_SIMULATOR
+        bool "Build with simulator support"
+        default n
+        help
+            Enable RID simulator (signal transmitter) component.
+            When disabled, the firmware is detector-only with minimal
+            binary size and optimal WiFi/BLE coexistence.
+
+endmenu

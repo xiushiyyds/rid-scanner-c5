@@ -307,7 +307,7 @@ static void init_backlight(void)
 /* ================================================================
  * 帧缓冲
  * ================================================================ */
-static int init_framebuffer(void)
+static int init_framebuffer(bool prefer_psram)
 {
     /* 创建 DMA 完成信号量 */
     s_dma_done_sem = xSemaphoreCreateBinary();
@@ -316,36 +316,51 @@ static int init_framebuffer(void)
         return -1;
     }
 
-    /* v2.5.12: 回退到 v2.3.2 的内部 SRAM 优先策略。
-     * 侦测模式下 LCD 在 BLE 之后初始化，此时 BLE 已抢占所需 SRAM，
-     * 剩余的内部 SRAM 给 LCD 全屏 DMA 不会影响 BLE/WiFi。
-     * PSRAM 优先策略在 v2.5.10/11 中验证不能修复 RID 问题。 */
-    s_fb = heap_caps_malloc(LCD_FB_SIZE,
-                            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (s_fb) {
-        s_use_full_dma = true;
-        ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
-    } else {
-        ESP_LOGW(TAG, "全屏 SRAM 不足，回退 PSRAM + 分块 DMA");
+    if (prefer_psram) {
+        /* early_init 路径（BLE 之前）：优先 PSRAM，避免抢占 108KB 连续内部 SRAM */
         s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_fb) {
-            s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_8BIT);
+        if (s_fb) {
+            size_t bounce_size = LCD_WIDTH * s_dma_lines * 2;
+            s_dma_buf = heap_caps_malloc(bounce_size,
+                                         MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (s_dma_buf) {
+                s_use_full_dma = false;
+                ESP_LOGI(TAG, "帧缓冲: PSRAM + SRAM DMA bounce %d bytes", bounce_size);
+            } else {
+                free(s_fb); s_fb = NULL;
+            }
         }
         if (!s_fb) {
-            ESP_LOGE(TAG, "帧缓冲分配失败!");
-            return -1;
+            s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                                    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (s_fb) {
+                s_use_full_dma = true;
+                ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
+            } else {
+                s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_8BIT);
+                if (!s_fb) { ESP_LOGE(TAG, "帧缓冲分配失败!"); return -1; }
+                s_use_full_dma = false;
+            }
         }
-
-        size_t bounce_size = LCD_WIDTH * s_dma_lines * 2;
-        s_dma_buf = heap_caps_malloc(bounce_size,
-                                     MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!s_dma_buf) {
-            ESP_LOGE(TAG, "DMA bounce buffer 分配失败 (%d bytes)", bounce_size);
-            return -1;
+    } else {
+        /* 正常路径（BLE 之后）：内部 SRAM 全屏 DMA 优先，与 v2.3.2 一致 */
+        s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                                MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (s_fb) {
+            s_use_full_dma = true;
+            ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
+        } else {
+            ESP_LOGW(TAG, "全屏 SRAM 不足，回退 PSRAM + 分块 DMA");
+            s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!s_fb) s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_8BIT);
+            if (!s_fb) { ESP_LOGE(TAG, "帧缓冲分配失败!"); return -1; }
+            size_t bounce_size = LCD_WIDTH * s_dma_lines * 2;
+            s_dma_buf = heap_caps_malloc(bounce_size,
+                                         MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!s_dma_buf) { ESP_LOGE(TAG, "DMA bounce buffer 分配失败"); return -1; }
+            s_use_full_dma = false;
+            ESP_LOGI(TAG, "帧缓冲: PSRAM + SRAM DMA bounce %d bytes", bounce_size);
         }
-        s_use_full_dma = false;
-        ESP_LOGI(TAG, "帧缓冲: PSRAM 渲染 + SRAM DMA bounce %d bytes (每次 %d 行)",
-                 bounce_size, s_dma_lines);
     }
     memset(s_fb, 0, LCD_FB_SIZE);
     return 0;
@@ -1412,7 +1427,7 @@ int lcd_display_early_init(void)
     if (s_hw_inited) return 0;
     ESP_LOGI(TAG, "=== LCD 早期硬件初始化（开机菜单用）===");
 
-    if (init_framebuffer() != 0) return -1;
+    if (init_framebuffer(true) != 0) return -1;
     if (init_lcd() != 0) return -1;
     init_backlight();
 
@@ -1426,7 +1441,7 @@ int lcd_display_init(void)
 
     /* 若开机菜单已初始化过硬件，跳过 framebuffer/SPI/背光初始化 */
     if (!s_hw_inited) {
-        if (init_framebuffer() != 0) return -1;
+        if (init_framebuffer(false) != 0) return -1;
         if (init_lcd() != 0) return -1;
         init_backlight();
         s_hw_inited = true;

@@ -55,8 +55,14 @@
 #include "dji_droneid.h"
 #include "evlog.h"
 
+#if CONFIG_RID_SCANNER_BUILD_SIMULATOR
+#include "sim_core.h"
+#include "sim_cities.h"
+#include "sim_lcd_ui.h"
+#endif
+
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.5.12"
+#define CRID_VERSION_STRING "2.5.13"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -540,18 +546,75 @@ static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_ou
  *  14. startup banner
  * ================================================================ */
 void app_main(void) {
-    /* v2.5.12: 纯侦测构建——彻底移除模拟器代码和 crid_simulator 组件链接。
-     * 启动顺序与 v2.3.2 完全一致：NVS → UART → tracker/GPS → BLE → LCD → WiFi。
-     * 这是决定性隔离测试：如果这版能收到 RID，说明问题由 crid_simulator
-     * 组件链接导致（代码段/数据段/BSS 布局变化）；如果仍收不到，
-     * 问题在更底层（sdkconfig/工具链/ESP-IDF 版本差异）。 */
+
+#if CONFIG_RID_SCANNER_BUILD_SIMULATOR
+    /* ================================================================
+     * 模拟器构建：直接进入模拟发射模式（不显示菜单）。
+     * 注意：此构建链接了 crid_simulator 组件，不能用于侦测——
+     * 链接模拟器会改变内存布局导致 WiFi/BLE 共存异常。
+     * 侦测请刷 firmware-detector 构建。
+     * ================================================================ */
+    if (lcd_display_early_init() != 0) {
+        ESP_LOGE("RID_MAIN", "LCD early init failed");
+    }
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        ret = nvs_flash_init();
+    }
+    esp_netif_init();
+    esp_event_loop_create_default();
+
+    ESP_LOGI("RID_MAIN", "Boot mode: SIMULATOR");
+
+    lcd_display_init_for_sim();
+    sim_init();
+
+    sim_config_t sim_cfg;
+    sim_get_default_config(&sim_cfg);
+    sim_cfg.target_count = 300;
+    sim_cfg.channel = 6;
+    sim_cfg.tx_power = 20;
+    sim_cfg.brand = SIM_BRAND_MIXED;
+    sim_cfg.chan_mode = SIM_CHAN_ROTATE_1_6_11;
+    sim_cfg.speed = 5.0f;
+    sim_cfg.flight_mode = SIM_MODE_CIRCLE;
+    sim_cfg.frame_interval_ms = 3;
+    sim_cfg.round_interval_ms = 1000;
+    sim_cfg.base_lat = g_sim_cities[sim_cfg.city_index].lat;
+    sim_cfg.base_lon = g_sim_cities[sim_cfg.city_index].lon;
+    sim_update_config(&sim_cfg);
+
+    ESP_LOGI("RID_MAIN", "Simulator armed (not transmitting). Press B on LCD to start.");
+    sim_lcd_ui_start();
+    printf("\nRID Simulator ready. Type 'help' for commands.\n\n");
+
+    char cli_ch;
+    while (1) {
+        int n = fread(&cli_ch, 1, 1, stdin);
+        if (n > 0) {
+            putchar(cli_ch);
+            sim_cli_feed(&cli_ch, 1);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    /* 不会到达这里 */
+#else
+    /* ================================================================
+     * 纯侦测构建（默认）：直接启动，不开机菜单，不链接模拟器。
+     * 这是日常使用的固件，WiFi/BLE 共存最稳定。
+     * ================================================================ */
+    ESP_LOGI("RID_MAIN", "Starting detector (pure build, no simulator)...");
+#endif
 
     /* ================================================================
      * 侦测模式启动流程（与 v2.3.2 完全一致）
-     * BLE 先初始化抢占连续内部 SRAM，LCD 在 BLE 之后初始化，
-     * WiFi 最后启动。不做 early_init、不显示开机菜单。
+     * BLE 先初始化抢占连续内部 SRAM，LCD 在 BLE 之后初始化，WiFi 最后启动。
      * ================================================================ */
     // 4. NVS + netif + event loop
+    // (模拟器构建中 NVS 已在上方初始化，这里跳过)
+#if !CONFIG_RID_SCANNER_BUILD_SIMULATOR
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -563,6 +626,7 @@ void app_main(void) {
     }
     esp_netif_init();
     esp_event_loop_create_default();
+#endif
 
     // 1. UART 数据端口 + JSON 回调（在 NVS 之后）
     uart_data_port_init();
