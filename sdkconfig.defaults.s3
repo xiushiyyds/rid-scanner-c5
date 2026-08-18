@@ -1,0 +1,77 @@
+# SDK 默认配置 for ESP32-S3 (LILYGO T-Display-S3)
+#
+# 用途：S3 专职模拟发射板（CONFIG_RID_SCANNER_BUILD_SIMULATOR=y）。
+#       S3 是双核 LX7 + 8MB Octal PSRAM，资源比 C5 宽裕，
+#       不需要 C5 那套 NimBLE 内存裁剪，且模拟器构建不开蓝牙。
+#
+# 用法：
+#   idf.py set-target esp32s3
+#   cp sdkconfig.defaults.s3 sdkconfig.defaults
+#   idf.py build
+# 或在 CI 中直接 cat 到 sdkconfig.defaults。
+
+# ================================================================
+# 目标芯片
+# ================================================================
+CONFIG_IDF_TARGET="esp32s3"
+
+# ================================================================
+# 模拟器构建：编译 crid_simulator 组件，走 app_main 的 SIMULATOR 分支
+# ================================================================
+CONFIG_RID_SCANNER_BUILD_SIMULATOR=y
+
+# 模拟器运行时不初始化 BLE（app_main 的 SIMULATOR 分支不调 crid_ble_init），
+# 但 main/CMakeLists 始终编译 crid_ble.c，需要 BT/NimBLE 头文件可用，
+# 因此这里保持 BT 启用。S3 双核 + 512KB SRAM 资源充足，无 C5 的内存压力。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+
+# ================================================================
+# Flash 16MB (T-Display-S3 标配 W25Q128，QIO/DIO 均可)
+# ================================================================
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ================================================================
+# PSRAM 8MB Octal (ESP32-S3R8)
+# ================================================================
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# 允许任务栈分配到 PSRAM（模拟器 UI/发射任务非 DMA 安全，可放 PSRAM）
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+
+# ================================================================
+# 分区表（与 C5 共用同一份 16MB 分区表）
+# ================================================================
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partition_table/partitionTable.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partition_table/partitionTable.csv"
+
+# ================================================================
+# FreeRTOS（S3 双核，跑默认 100Hz tick）
+# ================================================================
+CONFIG_FREERTOS_HZ=100
+
+# 主任务栈
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ================================================================
+# WiFi
+# ================================================================
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+
+# ================================================================
+# 日志
+# ================================================================
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

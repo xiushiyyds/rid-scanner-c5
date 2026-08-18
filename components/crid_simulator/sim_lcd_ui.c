@@ -392,12 +392,18 @@ static void draw_settings_page(void) {
 static void draw_about_page(void) {
     lcd_fb_fill(UI_BG);
     lcd_fb_text_center(60, "RID 模拟发射", UI_CYAN);
-    lcd_fb_text_center(86, "v2.6.2", UI_WHITE);
+    lcd_fb_text_center(86, "v2.7.0", UI_WHITE);
     lcd_fb_text_center(120, "GB42590 + DJI", UI_GRAY);
     lcd_fb_text_center(140, "多品牌 多信道", UI_GRAY);
     lcd_fb_text_center(160, "300目标 省市选择", UI_GRAY);
     lcd_fb_text_center(180, "信道分组轮发", UI_GRAY);
-    lcd_fb_text_center(200, "ESP32-C5", UI_DIM);
+    lcd_fb_text_center(200,
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+        "ESP32-S3",
+#else
+        "ESP32-C5",
+#endif
+        UI_DIM);
     lcd_fb_text_center(220, "LILYGO T-Display", UI_DIM);
     lcd_fb_text_center(LCD_HEIGHT - 30, "A返回", UI_GRAY);
 }

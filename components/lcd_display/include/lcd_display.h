@@ -23,8 +23,43 @@ extern "C" {
 #endif
 
 /* ================================================================
- * 引脚配置 — LILYGO T-Display-C5
+ * 板级引脚配置
+ *
+ * 由 CONFIG_IDF_TARGET 自动选择，同时支持两块发射/侦测板：
+ *   - T-Display-C5  (ESP32-C5) : ST7789 + SPI
+ *   - T-Display-S3  (ESP32-S3) : ST7789 + I8080 8位并口
  * ================================================================ */
+#include "sdkconfig.h"
+
+#if CONFIG_IDF_TARGET_ESP32S3
+/* -------- LILYGO T-Display-S3 (I8080 并口) -------- */
+#define LCD_BUS_I8080        1
+#define LCD_PIN_CS          6
+#define LCD_PIN_DC          7
+#define LCD_PIN_WR          8
+#define LCD_PIN_RD          9
+#define LCD_PIN_RST         5
+#define LCD_PIN_BK          38
+/* 8 位数据线 D0..D7（必须连续，供 esp_lcd_i80_bus 配置） */
+#define LCD_PIN_D0          39
+#define LCD_PIN_D1          40
+#define LCD_PIN_D2          41
+#define LCD_PIN_D3          42
+#define LCD_PIN_D4          45
+#define LCD_PIN_D5          46
+#define LCD_PIN_D6          47
+#define LCD_PIN_D7          48
+/* GPIO15 = 外设电源使能，必须在 LCD/背光初始化前置高，否则黑屏 */
+#define BOARD_POWER_EN_PIN  15
+
+#define BTN_USER_PIN        14
+#define BTN_BOOT_PIN        0
+/* S3 电池电压检测：GPIO4 ADC1_CH3 分压（1:2），无 AXP2602 */
+#define BOARD_BAT_ADC_PIN   4
+
+#else
+/* -------- LILYGO T-Display-C5 (SPI) -------- */
+#define LCD_BUS_SPI         1
 #define LCD_PIN_SCLK        7
 #define LCD_PIN_MOSI        9
 #define LCD_PIN_CS          26
@@ -43,13 +78,18 @@ extern "C" {
 
 #define AXP2602_I2C_ADDR    0x62
 #define AXP2602_INT_PIN     10
+#endif
 
 /* ================================================================
- * 屏幕参数
+ * 屏幕参数（两板相同：1.9 寸 ST7789 170×320 RGB565）
  * ================================================================ */
 #define LCD_WIDTH            170
 #define LCD_HEIGHT           320
-#define LCD_SPI_FREQ_HZ     (20 * 1000 * 1000)
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+#define LCD_BUS_FREQ_HZ     (10 * 1000 * 1000)  /* I8080 pclk 10MHz */
+#else
+#define LCD_BUS_FREQ_HZ     (20 * 1000 * 1000)  /* SPI 20MHz */
+#endif
 #define LCD_FB_SIZE         (LCD_WIDTH * LCD_HEIGHT * 2)
 
 /* ================================================================

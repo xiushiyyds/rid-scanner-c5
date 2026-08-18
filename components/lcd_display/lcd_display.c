@@ -19,9 +19,18 @@
 #include "lcd_font.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#ifdef CONFIG_IDF_TARGET_ESP32S3
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_i80_bus.h"
+#include "esp_rom_gpio.h"
+#include "driver/adc.h"
+#else
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
+#endif
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -34,7 +43,9 @@
 #include "esp_cache.h"
 #include "driver/gpio.h"
 #include "esp_intr_alloc.h"
+#ifndef CONFIG_IDF_TARGET_ESP32S3
 #include "driver/i2c.h"
+#endif
 
 #ifndef FIXED_CHANNEL
 #define FIXED_CHANNEL 6
@@ -129,9 +140,20 @@ void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb) {
 #define FT_TEXT_Y     (CONTENT_Y1 + (FOOTER_H - FONT_LINE_H) / 2)
 
 /* ================================================================
- * AXP2602 PMIC 电池电压读取（I2C）
- * T-Display-C5: SDA=GPIO2, SCL=GPIO3, addr=0x62
+ * 电池 / 电源管理
+ *
+ * T-Display-C5: AXP2602 PMIC over I2C (SDA=2, SCL=3, addr=0x62)
+ * T-Display-S3: GPIO15 电源使能 + GPIO4 ADC 分压测电池电压
  * ================================================================ */
+static int battery_mv_to_pct(int mv) {
+    if (mv <= 3300) return 0;
+    if (mv >= 4200) return 100;
+    /* 简单线性映射；锂电实际曲线 3.3V~4.2V */
+    return (mv - 3300) * 100 / 900;
+}
+
+#ifndef CONFIG_IDF_TARGET_ESP32S3
+/* ---------------- C5: AXP2602 PMIC ---------------- */
 #define AXP_I2C_PORT       I2C_NUM_0
 #define AXP_I2C_FREQ       100000
 static bool s_axp_inited = false;
@@ -139,6 +161,10 @@ static bool s_axp_inited = false;
 static esp_err_t axp_read_reg(uint8_t reg, uint8_t *val) {
     return i2c_master_write_read_device(AXP_I2C_PORT, AXP2602_I2C_ADDR,
                                         &reg, 1, val, 1, pdMS_TO_TICKS(50));
+}
+
+static void board_power_init(void) {
+    /* C5 无独立电源使能脚，由 AXP2602 管理 */
 }
 
 static void axp2602_init(void) {
@@ -195,12 +221,49 @@ static int axp2602_read_battery_pct(void) {
     return -1;
 }
 
-static int battery_mv_to_pct(int mv) {
-    if (mv <= 3300) return 0;
-    if (mv >= 4200) return 100;
-    /* 简单线性映射；锂电实际曲线 3.3V~4.2V */
-    return (mv - 3300) * 100 / 900;
+static int board_read_battery_mv(void) { return axp2602_read_battery_mv(); }
+static int board_read_battery_pct(void) { return axp2602_read_battery_pct(); }
+
+#else
+/* ---------------- S3: GPIO15 电源使能 + ADC 分压 ---------------- */
+static bool s_s3_pwr_inited = false;
+static bool s_s3_adc_inited = false;
+
+static void board_power_init(void) {
+    if (s_s3_pwr_inited) return;
+    /* GPIO15 = LCD/外设电源使能，必须置高，否则整板黑屏 */
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << BOARD_POWER_EN_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&cfg);
+    gpio_set_level(BOARD_POWER_EN_PIN, 1);
+    s_s3_pwr_inited = true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_LOGI(TAG, "S3 GPIO15 power enable set HIGH");
 }
+
+static void s3_adc_init(void) {
+    if (s_s3_adc_inited) return;
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    /* GPIO4 = ADC1_CH3 */
+    adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_12);
+    s_s3_adc_inited = true;
+}
+
+/* S3 电池经 1:2 分压接 GPIO4，满电 4.2V → 引脚上 2.1V。
+ * ADC_ATTEN_DB_12 量程 0~3.3V，12bit = 4095。 */
+static int s3_read_battery_mv(void) {
+    s3_adc_init();
+    int raw = adc1_get_raw(ADC1_CHANNEL_3);
+    if (raw < 0) return -1;
+    int pin_mv = (int)(raw * 3300LL / 4095);
+    return pin_mv * 2;  /* 还原分压 */
+}
+
+static int board_read_battery_mv(void) { return s3_read_battery_mv(); }
+static int board_read_battery_pct(void) { return -1; }  /* 无库仑计，用电压换算 */
+#endif
 
 /* ================================================================
  * DMA 完成回调（ISR 安全）
@@ -217,21 +280,12 @@ static bool IRAM_ATTR lcd_color_trans_done_cb(esp_lcd_panel_io_handle_t panel_io
 }
 
 /* ================================================================
- * SPI + LCD 初始化
+ * LCD 总线 + 面板初始化（C5: SPI；S3: I8080 8 位并口）
  * ================================================================ */
 static int init_lcd(void)
 {
-    ESP_LOGI(TAG, "初始化 SPI 总线");
-
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = LCD_PIN_MOSI,
-        .miso_io_num = -1,
-        .sclk_io_num = LCD_PIN_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_FB_SIZE + 8,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
+    /* S3 必须先拉高 GPIO15 给 LCD 供电；C5 为空操作 */
+    board_power_init();
 
     /* 硬件复位（与 LILYGO 官方时序一致） */
     gpio_config_t rst_conf = {
@@ -247,10 +301,60 @@ static int init_lcd(void)
     vTaskDelay(pdMS_TO_TICKS(125));
 
     esp_lcd_panel_io_handle_t io_handle = NULL;
+
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    ESP_LOGI(TAG, "初始化 I8080 8 位并口总线 (T-Display-S3)");
+
+    /* D0..D7 必须连续，从 LCD_PIN_D0 开始共 8 根 */
+    esp_lcd_i80_bus_handle_t i80_bus = NULL;
+    esp_lcd_i80_bus_config_t bus_cfg = {
+        .dc_gpio_num = LCD_PIN_DC,
+        .wr_gpio_num = LCD_PIN_WR,
+        .clk_src = LCD_CLK_SRC_PLL160M,
+        .data_gpio_nums = {
+            LCD_PIN_D0, LCD_PIN_D1, LCD_PIN_D2, LCD_PIN_D3,
+            LCD_PIN_D4, LCD_PIN_D5, LCD_PIN_D6, LCD_PIN_D7,
+        },
+        .bus_width = 8,
+        .max_transfer_bytes = LCD_FB_SIZE + 8,
+        .psram_trans_align = 64,
+        .sram_trans_align = 4,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_i80_bus(&bus_cfg, &i80_bus));
+
+    esp_lcd_panel_io_i80_config_t io_cfg = {
+        .cs_gpio_num = LCD_PIN_CS,
+        .pclk_hz = LCD_BUS_FREQ_HZ,
+        .trans_queue_depth = 10,
+        .on_color_trans_done = lcd_color_trans_done_cb,
+        .user_ctx = NULL,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .dc_levels = {
+            .dc_idle_level = 0,
+            .dc_cmd_level = 0,
+            .dc_dummy_level = 0,
+            .dc_data_level = 1,
+        },
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80_bus, &io_cfg, &io_handle));
+#else
+    ESP_LOGI(TAG, "初始化 SPI 总线 (T-Display-C5)");
+
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = LCD_PIN_MOSI,
+        .miso_io_num = -1,
+        .sclk_io_num = LCD_PIN_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_FB_SIZE + 8,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
+
     esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num = LCD_PIN_DC,
         .cs_gpio_num = LCD_PIN_CS,
-        .pclk_hz = LCD_SPI_FREQ_HZ,
+        .pclk_hz = LCD_BUS_FREQ_HZ,
         .spi_mode = 0,
         .trans_queue_depth = 10,
         .on_color_trans_done = lcd_color_trans_done_cb,
@@ -259,6 +363,7 @@ static int init_lcd(void)
         .lcd_param_bits = 8,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &io_handle));
+#endif
 
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = -1,
@@ -589,12 +694,12 @@ static void render_statusbar(int active_count, int channel)
     static uint32_t s_last_batt_read = 0;
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
     if (s_batt_pct < 0 || now - s_last_batt_read > 5000) {
-        /* 优先读硬件库仑计 SOC（寄存器 0x08），失败则用电压换算 */
-        int soc = axp2602_read_battery_pct();
+        /* 优先读硬件库仑计 SOC（C5 AXP2602 寄存器 0x08），失败则用电压换算 */
+        int soc = board_read_battery_pct();
         if (soc >= 0) {
             s_batt_pct = soc;
         } else {
-            int mv = axp2602_read_battery_mv();
+            int mv = board_read_battery_mv();
             if (mv > 0) {
                 s_batt_pct = battery_mv_to_pct(mv);
             } else if (s_batt_pct < 0) {
@@ -1427,7 +1532,14 @@ int lcd_display_early_init(void)
     if (s_hw_inited) return 0;
     ESP_LOGI(TAG, "=== LCD 早期硬件初始化（开机菜单用）===");
 
+    /* S3 有 512KB SRAM，始终用内部 SRAM 全屏 DMA（最快、无 bounce）；
+     * C5 内部 SRAM 紧张，early_init 阶段（BLE 之前）用 PSRAM 优先，
+     * 避免抢占 108KB 连续 DMA 影响 NimBLE controller。 */
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    if (init_framebuffer(false) != 0) return -1;
+#else
     if (init_framebuffer(true) != 0) return -1;
+#endif
     if (init_lcd() != 0) return -1;
     init_backlight();
 
@@ -1460,7 +1572,11 @@ int lcd_display_init(void)
 
     fb_fill(C_BG);
     fb_text_center(140, "无人机侦测器", C_CYAN);
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    fb_text_center(164, "T-Display-S3", C_GRAY);
+#else
     fb_text_center(164, "T-Display-C5", C_GRAY);
+#endif
     flush_framebuffer();
     vTaskDelay(pdMS_TO_TICKS(1000));
 
@@ -1473,8 +1589,10 @@ int lcd_display_init(void)
     };
     gpio_config(&btn_cfg);
 
-    /* lcdfix15: 初始化 AXP2602 PMIC（真实电量） */
+    /* 初始化板级电源/PMIC（C5: AXP2602；S3: GPIO15 已在 init_lcd 拉高） */
+#ifndef CONFIG_IDF_TARGET_ESP32S3
     axp2602_init();
+#endif
 
     s_key_queue = xQueueCreate(8, sizeof(lcd_key_event_t));
     if (!s_key_queue) return -1;
@@ -1487,12 +1605,14 @@ int lcd_display_init(void)
 }
 
 /* 模拟器模式专用：只初始化 PMIC，不启动侦测页刷新/按键任务。
- * framebuffer + SPI + 背光已由 early_init 完成。 */
+ * framebuffer + 总线 + 背光已由 early_init 完成。 */
 int lcd_display_init_for_sim(void)
 {
     ESP_LOGI(TAG, "=== LCD 初始化（模拟器模式）===");
     if (!s_hw_inited) return -1;
+#ifndef CONFIG_IDF_TARGET_ESP32S3
     axp2602_init();
+#endif
     return 0;
 }
 
@@ -1514,7 +1634,7 @@ int lcd_display_get_selection(void) { return s_selection; }
 void lcd_display_command(const char *cmd) { (void)cmd; }
 
 int lcd_display_get_battery_voltage(uint16_t *v) {
-    int mv = axp2602_read_battery_mv();
+    int mv = board_read_battery_mv();
     if (mv <= 0) return -1;
     if (v) *v = (uint16_t)mv;
     return 0;
