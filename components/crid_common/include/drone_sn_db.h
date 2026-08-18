@@ -34,7 +34,7 @@ typedef struct {
     drone_category_t category;
 } drone_sn_entry_t;
 
-#define DRONE_SN_DB_COUNT 117
+#define DRONE_SN_DB_COUNT 118
 
 static const drone_sn_entry_t drone_sn_db[] = {
     {"11223344", "Parrot",      "Anafi",                DRONE_CAT_CONSUMER},
@@ -103,6 +103,7 @@ static const drone_sn_entry_t drone_sn_db[] = {
     {"1581F8ZX", "DJI",         "Agras T70P",           DRONE_CAT_AGRICULTURE},
     {"1581F986", "DJI",         "Mavic 4 Pro 512GB",    DRONE_CAT_CONSUMER},
     {"1581F9DE", "DJI",         "Mini 5 Pro",           DRONE_CAT_CONSUMER},
+    {"1581F9HE", "DJI",         "Matrice 4T/4E",        DRONE_CAT_INDUSTRIAL},
     {"1581FA6Q", "DJI",         "Neo 2",                DRONE_CAT_FPV},
     {"1581FA8J", "DJI",         "Avata 360",            DRONE_CAT_CONSUMER},
     {"1581FAE3", "DJI",         "Agras T70S",           DRONE_CAT_AGRICULTURE},
