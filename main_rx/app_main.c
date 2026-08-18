@@ -39,6 +39,7 @@
 #include "opendroneid.h"
 #include "esp_wifi.h"
 #include "esp_bt.h"
+#include "esp_timer.h"
 
 #include "crid_rx_types.h"
 #include "gps_module.h"
@@ -59,7 +60,7 @@
 #include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.5.10"
+#define CRID_VERSION_STRING "2.5.11"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -543,34 +544,45 @@ static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_ou
  *  14. startup banner
  * ================================================================ */
 void app_main(void) {
-    // 0. 早期 LCD 硬件初始化（framebuffer + SPI + 背光），
-    //    用于显示开机模式选择菜单。WiFi/BLE 尚未启动，内部 SRAM 充足。
-    if (lcd_display_early_init() != 0) {
-        ESP_LOGE("RID_MAIN", "LCD early init failed (non-fatal)");
+    /* v2.5.11: 默认直接进侦测模式，启动顺序与 v2.3.2 完全一致
+     * （不做 LCD early_init、不做 NVS 提前初始化、不显示开机菜单）。
+     * 模拟器模式需要通过串口在启动前 3 秒内按 's' 键进入。
+     * 这样可以定位 v2.5.x RID 收不到信号的问题。 */
+
+    /* 给串口 3 秒时间按 's' 进入模拟器（仅在 USB/UART 有输入时）*/
+    bool want_simulator = false;
+    {
+        /* 设置 stdin 非阻塞 */
+        fflush(stdin);
+        int64_t t0 = esp_timer_get_time();
+        while ((esp_timer_get_time() - t0) < 3000000) {
+            int c = fgetc(stdin);
+            if (c == 's' || c == 'S') { want_simulator = true; break; }
+            if (c != EOF && c != -1) {
+                /* 消耗其他字符 */
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
 
-    // 0.1 NVS 初始化（模拟器配置需要 NVS）
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        ret = nvs_flash_init();
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE("RID_MAIN", "NVS init failed: %s", esp_err_to_name(ret));
-    }
-    esp_netif_init();
-    esp_event_loop_create_default();
+    if (want_simulator) {
+        /* 模拟器分支：需要 LCD + NVS + netif 提前初始化 */
+        if (lcd_display_early_init() != 0) {
+            ESP_LOGE("RID_MAIN", "LCD early init failed");
+        }
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            nvs_flash_erase();
+            ret = nvs_flash_init();
+        }
+        esp_netif_init();
+        esp_event_loop_create_default();
+        boot_mode_t boot_mode = BOOT_MODE_SIMULATOR;
+        ESP_LOGI("RID_MAIN", "Boot mode: SIMULATOR (serial trigger)");
 
-    // 0.2 开机模式选择菜单（6秒超时默认侦测）
-    boot_mode_t boot_mode = lcd_boot_menu(6000);
-    ESP_LOGI("RID_MAIN", "Boot mode selected: %d (%s)",
-             (int)boot_mode,
-             boot_mode == BOOT_MODE_SIMULATOR ? "SIMULATOR" : "DETECTOR");
-
-    // ================================================================
-    // 模拟发射模式（v2.6.2：开机只初始化不发射，按 B 启动）
-    // ================================================================
-    if (boot_mode == BOOT_MODE_SIMULATOR) {
+        // ================================================================
+        // 模拟发射模式（v2.6.2：开机只初始化不发射，按 B 启动）
+        // ================================================================
         // LCD 硬件已在 early_init 完成（framebuffer+SPI+背光），
         // 这里只初始化 PMIC，不启动侦测页的刷新/按键任务（模拟器有自己的 UI）。
         lcd_display_init_for_sim();
@@ -618,11 +630,25 @@ void app_main(void) {
         /* 不会到达这里 */
     }
 
-    // ================================================================
-    // 侦测模式（原有启动流程）
-    // ================================================================
+    /* ================================================================
+     * 侦测模式启动流程（v2.5.11: 与 v2.3.2 完全一致）
+     * BLE 先初始化抢占连续内部 SRAM，LCD 在 BLE 之后初始化，
+     * WiFi 最后启动。不做 early_init、不显示开机菜单。
+     * ================================================================ */
+    // 4. NVS + netif + event loop
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        json_error("RID_MAIN", "NVS init failed");
+        return;
+    }
+    esp_netif_init();
+    esp_event_loop_create_default();
 
-    // 1. UART 数据端口 + JSON 回调
+    // 1. UART 数据端口 + JSON 回调（在 NVS 之后）
     uart_data_port_init();
     json_set_data_write_cb(uart_data_write_cb, NULL);
 
@@ -643,9 +669,6 @@ void app_main(void) {
 
     // 3.5 证据日志
     evlog_init();
-
-    // 4. NVS 已在开机菜单前初始化，此处跳过重复初始化
-    //    （nvs_flash_init 可重复调用，返回 ESP_OK）
 
     // 5. 释放经典蓝牙内存
     esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
