@@ -4,7 +4,7 @@
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
  * v2.1.0: 删除 TDD 时分复用，WiFi 不再被应用层打断。
  * WiFi buffer 大幅削减以节省内部 SRAM。
- * 信道轮转：ch6 长驻 800ms，ch1/ch11 各 300ms。
+ * 信道轮转：ch6 1500ms, ch1/ch11 各 250ms（v2.5.9 回退 v2.3.2）。
  */
 
 #include <string.h>
@@ -218,12 +218,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
  不再依赖应用层 TDD（v2.1.0 删除）。
 
- ch6 驻留 1000ms（多数无人机默认信道，完整覆盖 1Hz 信标周期），
- ch1/ch11 各驻留 400ms（覆盖非默认信道）。
- 周期 1.8 秒，ch6 占 56%，ch1/ch11 各占 22%。
+ ch6 驻留 1500ms（多数无人机默认信道，75%占比），
+ ch1/ch11 各驻留 250ms（覆盖非默认信道）。
+ 周期 2.0 秒，ch6 占 75%，ch1/ch11 各占 12.5%。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 400, 400};  /* v2.5.8: ch6 1500ms, 占比65% */
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 250, 250};  /* v2.5.9: 回退v2.3.2 */
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
@@ -238,7 +238,7 @@ static TaskHandle_t s_hold_task_handle = NULL;
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1000ms / ch1,ch11 400ms (56%% ch6, period 1.8s)");
+    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1.5s / ch1,ch11 250ms (75%% ch6)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -256,29 +256,15 @@ static void channel_hold_task(void *pvParameter) {
         uint8_t ch = SCAN_CHANNELS[idx];
         uint16_t dwell = CHANNEL_DWELL_MS_ARR[idx];
 
-        /* v2.5.7: 单次 esp_wifi_set_channel()，不重试。
-         * v2.5.6 的 3 次重试循环（优先级22 + 每次30ms等待）在 C5 单核 RISC-V 上
-         * 会抢占 WiFi 内部 task 的 CPU 时间，导致 promiscuous 回调收不到包。
-         * set_channel 失败通常是因为 BLE 扫描窗口占用射频（PTA 仲裁），
-         * 这是暂时的，下一个周期自然会成功，不需要死磕重试。 */
-        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        uint8_t actual_ch = 0;
-        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
-        esp_wifi_get_channel(&actual_ch, &second);
+        /* v2.5.9: 与 v2.3.2 一致——先标记信道再 set_channel。
+         * BLE PTA 可能使 set_channel 短暂失败，但 WiFi 会在下次重试，
+         * LCD 显示轮巡节奏即可，不阻塞主循环。 */
+        s_current_channel = ch;
 
-        static uint32_t s_ch_ok = 0, s_ch_fail = 0;
-        if (ret == ESP_OK && actual_ch == ch) {
-            s_current_channel = ch;
-            s_ch_ok++;
-        } else {
-            s_ch_fail++;
-            if (s_ch_fail % 5 == 1) {
-                snprintf(msg, sizeof(msg),
-                         "ch -> %d FAIL ret=%s actual=%d (ok=%lu fail=%lu)",
-                         ch, esp_err_to_name(ret), actual_ch,
-                         (unsigned long)s_ch_ok, (unsigned long)s_ch_fail);
-                json_warning("RID_SNIFF", msg);
-            }
+        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        if (ret != ESP_OK && !s_hold_should_stop) {
+            snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
+            json_warning("RID_SNIFF", msg);
         }
         idx = (idx + 1) % SCAN_CHANNEL_COUNT;
 
