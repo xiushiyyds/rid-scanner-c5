@@ -58,7 +58,7 @@ typedef enum {
     SCAN_DUTY_LOW,     /* 已连接：40% 占空比，GATT 连接事件稳定 */
 } scan_duty_t;
 
-static volatile scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;
+static volatile scan_duty_t s_scan_duty = SCAN_DUTY_LOW;  /* v2.5.8: 默认40%，给WiFi让出射频 */
 
 /* ---- 前向声明 ---- */
 static int ble_scan_gap_event(struct ble_gap_event *event, void *arg);

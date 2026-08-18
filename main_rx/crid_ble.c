@@ -483,7 +483,7 @@ static void ble_delayed_scan_task(void *arg)
     ESP_LOGI(TAG, "Starting/restarting BLE RID scan (delay=%lu ms)", (unsigned long)delay_ms);
     crid_ble_scan_stop();
     vTaskDelay(pdMS_TO_TICKS(100));
-    crid_ble_scan_set_duty_high();
+    crid_ble_scan_set_duty_low();  /* v2.5.8: 40% duty，让WiFi set_channel能成功 */
     crid_ble_scan_start();
     vTaskDelete(NULL);
 }

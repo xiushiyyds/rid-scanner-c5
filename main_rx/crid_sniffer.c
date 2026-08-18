@@ -223,7 +223,7 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  周期 1.8 秒，ch6 占 56%，ch1/ch11 各占 22%。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 400, 400};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 400, 400};  /* v2.5.8: ch6 1500ms, 占比65% */
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 
