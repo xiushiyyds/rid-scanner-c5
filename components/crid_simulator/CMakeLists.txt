@@ -1,9 +1,8 @@
-# crid_simulator 组件 — RID 伪造模拟器 v2.6.0
+# crid_simulator 组件 — v2.5.12 临时禁用以隔离侦测 RID bug
+# 当侦测 bug 修复后恢复：
+#   SRCS sim_core.c sim_encode.c sim_wifi.c sim_patrol.c sim_lcd_ui.c
 idf_component_register(
-    SRCS sim_core.c sim_encode.c sim_wifi.c sim_patrol.c sim_lcd_ui.c
+    SRCS
     INCLUDE_DIRS "include"
-    REQUIRES esp_wifi nvs_flash esp_netif esp_event esp_timer driver
-             esp_driver_gpio esp_hw_support lcd_display
-    PRIV_REQUIRES soc
+    REQUIRES
 )
-target_link_libraries(${COMPONENT_LIB} m)

@@ -316,42 +316,36 @@ static int init_framebuffer(void)
         return -1;
     }
 
-    /* 优先 PSRAM 分配 framebuffer——v2.5.10:
-     * early_init 在 BLE/WiFi 初始化之前调用，若抢占 108KB 连续内部 SRAM，
-     * NimBLE host/controller 将无法获得足够连续内存，导致 BLE 扫描异常
-     * 并通过 PTA 影响 WiFi set_channel，最终 RID 收包失败。
-     * PSRAM 渲染 + 40 行 SRAM DMA bounce 性能足够（20MHz SPI 下无感知）。*/
-    s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* v2.5.12: 回退到 v2.3.2 的内部 SRAM 优先策略。
+     * 侦测模式下 LCD 在 BLE 之后初始化，此时 BLE 已抢占所需 SRAM，
+     * 剩余的内部 SRAM 给 LCD 全屏 DMA 不会影响 BLE/WiFi。
+     * PSRAM 优先策略在 v2.5.10/11 中验证不能修复 RID 问题。 */
+    s_fb = heap_caps_malloc(LCD_FB_SIZE,
+                            MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (s_fb) {
+        s_use_full_dma = true;
+        ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
+    } else {
+        ESP_LOGW(TAG, "全屏 SRAM 不足，回退 PSRAM + 分块 DMA");
+        s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_fb) {
+            s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_8BIT);
+        }
+        if (!s_fb) {
+            ESP_LOGE(TAG, "帧缓冲分配失败!");
+            return -1;
+        }
+
         size_t bounce_size = LCD_WIDTH * s_dma_lines * 2;
         s_dma_buf = heap_caps_malloc(bounce_size,
                                      MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (s_dma_buf) {
-            s_use_full_dma = false;
-            ESP_LOGI(TAG, "帧缓冲: PSRAM 渲染 + SRAM DMA bounce %d bytes (每次 %d 行)",
-                     bounce_size, s_dma_lines);
-        } else {
-            ESP_LOGW(TAG, "PSRAM framebuffer allocated but DMA bounce failed, trying full SRAM");
-            free(s_fb);
-            s_fb = NULL;
+        if (!s_dma_buf) {
+            ESP_LOGE(TAG, "DMA bounce buffer 分配失败 (%d bytes)", bounce_size);
+            return -1;
         }
-    }
-    if (!s_fb) {
-        /* fallback: 内部 SRAM 全屏 DMA（需在 WiFi/BLE init 后才有足够连续空间）*/
-        s_fb = heap_caps_malloc(LCD_FB_SIZE,
-                                MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (s_fb) {
-            s_use_full_dma = true;
-            ESP_LOGI(TAG, "帧缓冲: 全屏内部 SRAM DMA (%d bytes)", LCD_FB_SIZE);
-        } else {
-            s_fb = heap_caps_malloc(LCD_FB_SIZE, MALLOC_CAP_8BIT);
-            if (!s_fb) {
-                ESP_LOGE(TAG, "帧缓冲分配失败!");
-                return -1;
-            }
-            s_use_full_dma = false;
-            ESP_LOGW(TAG, "帧缓冲: 普通内存分配（无DMA加速）");
-        }
+        s_use_full_dma = false;
+        ESP_LOGI(TAG, "帧缓冲: PSRAM 渲染 + SRAM DMA bounce %d bytes (每次 %d 行)",
+                 bounce_size, s_dma_lines);
     }
     memset(s_fb, 0, LCD_FB_SIZE);
     return 0;

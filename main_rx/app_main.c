@@ -39,7 +39,6 @@
 #include "opendroneid.h"
 #include "esp_wifi.h"
 #include "esp_bt.h"
-#include "esp_timer.h"
 
 #include "crid_rx_types.h"
 #include "gps_module.h"
@@ -55,12 +54,9 @@
 #include "driver/gpio.h"
 #include "dji_droneid.h"
 #include "evlog.h"
-#include "sim_core.h"
-#include "sim_cities.h"
-#include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.5.11"
+#define CRID_VERSION_STRING "2.5.12"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -544,94 +540,14 @@ static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_ou
  *  14. startup banner
  * ================================================================ */
 void app_main(void) {
-    /* v2.5.11: 默认直接进侦测模式，启动顺序与 v2.3.2 完全一致
-     * （不做 LCD early_init、不做 NVS 提前初始化、不显示开机菜单）。
-     * 模拟器模式需要通过串口在启动前 3 秒内按 's' 键进入。
-     * 这样可以定位 v2.5.x RID 收不到信号的问题。 */
-
-    /* 给串口 3 秒时间按 's' 进入模拟器（仅在 USB/UART 有输入时）*/
-    bool want_simulator = false;
-    {
-        /* 设置 stdin 非阻塞 */
-        fflush(stdin);
-        int64_t t0 = esp_timer_get_time();
-        while ((esp_timer_get_time() - t0) < 3000000) {
-            int c = fgetc(stdin);
-            if (c == 's' || c == 'S') { want_simulator = true; break; }
-            if (c != EOF && c != -1) {
-                /* 消耗其他字符 */
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-    }
-
-    if (want_simulator) {
-        /* 模拟器分支：需要 LCD + NVS + netif 提前初始化 */
-        if (lcd_display_early_init() != 0) {
-            ESP_LOGE("RID_MAIN", "LCD early init failed");
-        }
-        esp_err_t ret = nvs_flash_init();
-        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            nvs_flash_erase();
-            ret = nvs_flash_init();
-        }
-        esp_netif_init();
-        esp_event_loop_create_default();
-        boot_mode_t boot_mode = BOOT_MODE_SIMULATOR;
-        ESP_LOGI("RID_MAIN", "Boot mode: SIMULATOR (serial trigger)");
-
-        // ================================================================
-        // 模拟发射模式（v2.6.2：开机只初始化不发射，按 B 启动）
-        // ================================================================
-        // LCD 硬件已在 early_init 完成（framebuffer+SPI+背光），
-        // 这里只初始化 PMIC，不启动侦测页的刷新/按键任务（模拟器有自己的 UI）。
-        lcd_display_init_for_sim();
-
-        // 初始化模拟器（内部会从 NVS 加载上次配置）
-        sim_init();
-
-        /* 写入默认参数（300 架、大连、MIXED、三信道、20dBm）。
-         * 不立即 sim_start()——等用户在 LCD 上按 B 启动，避免一上电就发射。 */
-        sim_config_t sim_cfg;
-        sim_get_default_config(&sim_cfg);
-        sim_cfg.target_count = 300;
-        sim_cfg.channel = 6;
-        sim_cfg.tx_power = 20;
-        sim_cfg.brand = SIM_BRAND_MIXED;
-        sim_cfg.chan_mode = SIM_CHAN_ROTATE_1_6_11;
-        sim_cfg.speed = 5.0f;
-        sim_cfg.flight_mode = SIM_MODE_CIRCLE;
-        sim_cfg.frame_interval_ms = 3;
-        sim_cfg.round_interval_ms = 1000;
-        /* 城市索引 -> 坐标 */
-        sim_cfg.base_lat = g_sim_cities[sim_cfg.city_index].lat;
-        sim_cfg.base_lon = g_sim_cities[sim_cfg.city_index].lon;
-        sim_update_config(&sim_cfg);
-
-        ESP_LOGI("RID_MAIN", "Simulator armed (not transmitting). Press B on LCD to start.");
-
-        // 启动专属 LCD UI（UI 会显示"待机"，按 B 启动 sim_start(NULL)）
-        sim_lcd_ui_start();
-
-        // 打印 CLI 帮助
-        printf("\nRID Simulator v2.6.2 ready. Type 'help' for commands.\n\n");
-
-        // 主循环：从 UART0 (console) 读取 CLI 命令
-        char cli_ch;
-        while (1) {
-            int n = fread(&cli_ch, 1, 1, stdin);
-            if (n > 0) {
-                putchar(cli_ch);  // 回显
-                sim_cli_feed(&cli_ch, 1);
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
-        /* 不会到达这里 */
-    }
+    /* v2.5.12: 纯侦测构建——彻底移除模拟器代码和 crid_simulator 组件链接。
+     * 启动顺序与 v2.3.2 完全一致：NVS → UART → tracker/GPS → BLE → LCD → WiFi。
+     * 这是决定性隔离测试：如果这版能收到 RID，说明问题由 crid_simulator
+     * 组件链接导致（代码段/数据段/BSS 布局变化）；如果仍收不到，
+     * 问题在更底层（sdkconfig/工具链/ESP-IDF 版本差异）。 */
 
     /* ================================================================
-     * 侦测模式启动流程（v2.5.11: 与 v2.3.2 完全一致）
+     * 侦测模式启动流程（与 v2.3.2 完全一致）
      * BLE 先初始化抢占连续内部 SRAM，LCD 在 BLE 之后初始化，
      * WiFi 最后启动。不做 early_init、不显示开机菜单。
      * ================================================================ */
