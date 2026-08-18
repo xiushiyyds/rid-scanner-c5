@@ -255,21 +255,34 @@ static void channel_hold_task(void *pvParameter) {
     while (!s_hold_should_stop) {
         uint8_t ch = SCAN_CHANNELS[idx];
         uint16_t dwell = CHANNEL_DWELL_MS_ARR[idx];
-        s_current_channel = ch;
 
-        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        if (ret != ESP_OK && !s_hold_should_stop) {
-            snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
-            json_warning("RID_SNIFF", msg);
-        }
-        idx = (idx + 1) % SCAN_CHANNEL_COUNT;
-
-        /* 每次切换都打印当前信道，方便串口确认轮巡在跑 */
+        /* v2.5.6: 先切信道，校验 actual 成功后再更新 s_current_channel。
+         * 之前是先写 s_current_channel 再 set_channel，WiFi 驱动可能拒绝切（STA 扫描中/
+         * BLE 共存抢射频等），但显示上仍然在跳，造成"看起来在轮巡实际没收包"的假象。
+         * 现在失败会重试 3 次，每次间隔 30ms，并把 actual 真实值打印出来。 */
+        esp_err_t ret = ESP_FAIL;
         uint8_t actual_ch = 0;
         wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
-        esp_wifi_get_channel(&actual_ch, &second);
-        snprintf(msg, sizeof(msg), "ch -> %d (actual=%d) dwell=%ums", ch, actual_ch, dwell);
-        json_debug("RID_SNIFF", msg);
+        for (int attempt = 0; attempt < 3; attempt++) {
+            ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            esp_wifi_get_channel(&actual_ch, &second);
+            if (ret == ESP_OK && actual_ch == ch) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        if (ret == ESP_OK && actual_ch == ch) {
+            s_current_channel = ch;
+            snprintf(msg, sizeof(msg), "ch -> %d OK dwell=%ums", ch, dwell);
+            json_debug("RID_SNIFF", msg);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "ch -> %d FAILED ret=%s actual=%d (retry exhausted)",
+                     ch, esp_err_to_name(ret), actual_ch);
+            json_warning("RID_SNIFF", msg);
+            /* 即使失败也推进 idx，避免卡死在某个信道 */
+        }
+        idx = (idx + 1) % SCAN_CHANNEL_COUNT;
 
         /* 分段 delay，stop 时能快速退出 */
         for (int i = 0; i < (dwell / 50) && !s_hold_should_stop; i++) {

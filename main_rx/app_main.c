@@ -59,7 +59,7 @@
 #include "sim_lcd_ui.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.2"
+#define CRID_VERSION_STRING "2.5.6"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__

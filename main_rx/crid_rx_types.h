@@ -282,7 +282,7 @@ typedef struct {
 #define PARSER_TASK_PRIO        4           // 解析任务优先级
 #define MONITOR_TASK_PRIO       3           // 监控任务优先级
 #define CH_HOLD_TASK_STACK      3072        // 信道保持任务栈大小
-#define CH_HOLD_TASK_PRIO       5           // 信道轮巡任务优先级（需高优先级，避免被 BLE/LCD 饿死）
+#define CH_HOLD_TASK_PRIO       22          // v2.5.6: 必须高于 WiFi 内部任务(~19-21)/BLE host(~20)，否则被饿死，ch 标不跳
 
 // 锁定监听信道
 #define FIXED_CHANNEL           6
