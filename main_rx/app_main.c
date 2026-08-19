@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.3"
+#define CRID_VERSION_STRING "2.6.4"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -278,14 +278,20 @@ static void parser_task(void *pvParameter) {
                 }
             }
 
-            /* 证据留存：首次发现立即记录，之后每 10 条记录一次（解析+合并完成后写） */
-            if (was_new && (uav->dji_serial[0] || uav->location.valid)) {
-                evlog_write(uav);
-            } else if (uav->msg_count % 10 == 0 && (uav->dji_serial[0] || uav->location.valid)) {
-                evlog_write(uav);
-            }
+            /* v2.6.4: 证据留存条件在 mutex 内判断，但 evlog_write 移到 mutex 外。
+             * evlog_write 内部可能执行 esp_partition_erase_range（扇区擦除 30-50ms），
+             * 持锁期间会阻塞 LCD 刷新和 parser 的其他迭代。 */
+            bool need_evlog = (was_new || uav->msg_count % 10 == 0) &&
+                              (uav->dji_serial[0] || uav->location.valid);
 
             xSemaphoreGive(mutex);
+
+            /* v2.6.4: 在 mutex 外写 Flash（uav 指针指向 tracker 静态表，
+             * monitor_task 可能将 slot active=false 但不释放内存，
+             * evlog_write 只读取字段，30-50ms 内数据不会被覆盖） */
+            if (need_evlog) {
+                evlog_write(uav);
+            }
 
             /* v2.0.8: DJI 路径同样立即发首次，后续 1 秒节流 */
             if (was_new && (uav->basic_id.valid || uav->location.valid)) {
@@ -414,14 +420,15 @@ static void parser_task(void *pvParameter) {
             }
         }
 
-        /* 证据留存：首次发现立即记录，之后每 10 条记录一次（解析+合并完成后写） */
-        if (was_new && (uav->basic_id.valid || uav->location.valid)) {
-            evlog_write(uav);
-        } else if (uav->msg_count % 10 == 0 && (uav->basic_id.valid || uav->location.valid)) {
-            evlog_write(uav);
-        }
+        /* v2.6.4: 证据留存条件在 mutex 内判断，evlog_write 移到 mutex 外 */
+        bool need_evlog = (was_new || uav->msg_count % 10 == 0) &&
+                          (uav->basic_id.valid || uav->location.valid);
 
         xSemaphoreGive(mutex);
+
+        if (need_evlog) {
+            evlog_write(uav);
+        }
 
         /* v2.0.8: 数据推送策略。
          * 新目标立即发 discovery + update（无节流）。
@@ -718,7 +725,9 @@ void app_main(void) {
         return;
     }
 
-    xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 3072, NULL, 3, NULL, 0);
+    /* v2.6.4: 栈 3072→4096。crid_ble_write_cb 内部有 1024 字节栈快照，
+     * 加上本任务的 96 字节 buf 和调用帧，3072 偏紧。 */
+    xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 4096, NULL, 3, NULL, 0);
 
     // 12. WiFi 最后初始化（自定义 config 削减 buffer，节省内部 SRAM）
     ret = crid_sniffer_init();

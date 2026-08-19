@@ -10,6 +10,8 @@
  *         导致的周期性丢包；修复 get_best_lock_channel 未检查 active 标志。
  * v2.6.3: 锁定超时 30s→10s（目标消失后更快恢复扫描）；移除无用 Beacon 采样和
  *         SSID 字段（省 ~2KB 内部 SRAM + ISR 时间）。
+ * v2.6.4: ISR 临界区稳定性修复——移除 Beacon 采样减少 ISR 负载；
+ *         移除 SSID IE 解析（不再使用）。
  */
 
 #include <string.h>
@@ -71,8 +73,6 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     uint8_t *ie_ptr = pkt->payload + 36;
     uint16_t ie_total_len = actual_len - 36;
 
-    uint8_t ssid[33] = {0};
-    uint8_t ssid_len = 0;
     bool has_rid_ie = false;
     uint16_t i = 0;
 
@@ -123,9 +123,6 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                         msg.oui[0] = oui0; msg.oui[1] = oui1; msg.oui[2] = oui2;
                         msg.oui_type = oui_type;
                         msg.has_vendor_ie = true;
-
-                        memcpy(msg.ssid, ssid, ssid_len);
-                        msg.ssid_len = ssid_len;
 
                         uint16_t copy_len = odid_len;
                         memcpy(msg.data, odid_payload, copy_len);
@@ -181,43 +178,13 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                 }
             }
         }
-        // 处理 SSID IE (ID=0x00)
-        else if (id == 0x00 && ssid_len == 0) {
-            if (len <= 32) {
-                ssid_len = len;
-                if (ssid_len > 0) {
-                    memcpy(ssid, &ie_ptr[i + 2], ssid_len);
-                }
-            }
-        }
-
         i += 2 + len;
     }
 
-    // ---------- 无 Vendor IE 的 Beacon 采样 ----------
-    static uint32_t s_beacon_no_vendor_count = 0;
-    if (subtype == 8 && !has_rid_ie) {
-        s_beacon_no_vendor_count++;
-        if ((s_beacon_no_vendor_count & 0x7F) == 0) {
-            sniffer_msg_t msg;
-            memset(&msg, 0, sizeof(msg));
-            memcpy(msg.src_mac, hdr->addr2, 6);
-            msg.rssi = pkt->rx_ctrl.rssi;
-            msg.channel = pkt->rx_ctrl.channel;
-            msg.timestamp_ms = (uint32_t)(xTaskGetTickCountFromISR() * portTICK_PERIOD_MS);
-            msg.is_rid = false;
-            msg.msg_type = MSG_TYPE_BEACON_NO_VENDOR;
-            msg.has_vendor_ie = false;
-            memcpy(msg.ssid, ssid, ssid_len);
-            msg.ssid_len = ssid_len;
-
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            if (xQueueSendFromISR(g_sniffer_queue, &msg, &xHigherPriorityTaskWoken) != pdTRUE) {
-                g_stats.queue_overflows++;
-            }
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-        }
-    }
+    /* v2.6.4: 移除无用 Beacon 采样（MSG_TYPE_BEACON_NO_VENDOR）。
+     * 之前每 128 个无 Vendor IE 的 Beacon 就组一个 313 字节消息入队，
+     * parser_task 收到后直接 continue 丢弃——纯浪费 ISR 时间和队列空间。
+     * RID 侦测只需关心 Vendor IE (221)，普通 Beacon 无需入队。 */
 }
 
 /* ================================================================
@@ -275,7 +242,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.3: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
+             "Channel rotation v2.6.4: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));

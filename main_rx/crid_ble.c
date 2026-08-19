@@ -143,7 +143,6 @@ static void ble_advertise_start(void);
 static void ble_connect_task(void *arg);
 static void ble_delayed_scan_task(void *arg);
 static void ble_send_welcome_task(void *arg);  /* v2.1.1: SUBSCRIBE 后发 PAIR_OK */
-static void ble_enqueue_line(const char *line, size_t len);  /* v2.0.5 forward decl */
 
 /* ================================================================
  * GATT 服务定义
@@ -261,13 +260,31 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         g_pair_ok_sent = false;
         crid_ble_reset_pair();
         /* v2.0.5: 连接断开时把行缓冲中残留的数据整体入队，
-         * 避免最后一行 JSON（不以 \n 结尾）丢失。 */
-        portENTER_CRITICAL(&g_ble_line_mux);
-        if (g_ble_linebuf_len > 0) {
-            ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
-            g_ble_linebuf_len = 0;
+         * 避免最后一行 JSON（不以 \n 结尾）丢失。
+         * v2.6.4: 在临界区内只拷到栈快照，出临界区后再入队。 */
+        {
+            char snapshot[BLE_TX_BUF_SIZE];
+            size_t leftover = 0;
+            portENTER_CRITICAL(&g_ble_line_mux);
+            leftover = g_ble_linebuf_len;
+            if (leftover > 0) {
+                memcpy(snapshot, g_ble_linebuf, leftover);
+                g_ble_linebuf_len = 0;
+            }
+            portEXIT_CRITICAL(&g_ble_line_mux);
+            if (leftover > 0) {
+                if (leftover > BLE_TX_BUF_SIZE - 1) leftover = BLE_TX_BUF_SIZE - 1;
+                char *buf = (char *)malloc(leftover + 1);
+                if (buf) {
+                    memcpy(buf, snapshot, leftover);
+                    buf[leftover] = '\0';
+                    if (xQueueSend(g_ble_tx_queue, &buf, 0) != pdTRUE) {
+                        free(buf);
+                        g_ble_queue_overflow_count++;
+                    }
+                }
+            }
         }
-        portEXIT_CRITICAL(&g_ble_line_mux);
         /* v2.1.0: 断开后恢复 HIGH duty 扫描。
          * 用 delayed_scan_restart 安全重启（不能在 host task 阻塞）。 */
         crid_ble_delayed_scan_restart(100);
@@ -460,24 +477,25 @@ static void ble_send_welcome_task(void *arg) {
 static void ble_connect_task(void *arg) {
     (void)arg;
 
-    /* v2.6.3: 主动发起 MTU 交换，请求 512 字节。
-     * 某些 Web Bluetooth 平台不主动协商 MTU，会卡在默认 23 字节，
-     * 每条 JSON 要分十几片，延迟和丢包风险大增。 */
-    if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        int rc = ble_gattc_exchange_mtu(g_nus_conn_handle, NULL, NULL);
-        if (rc == 0) {
-            ESP_LOGI(TAG, "MTU exchange initiated");
-        }
-    }
-
-    /* v2.1.4: 连接期间完全停止 BLE RID 扫描。 */
+    /* v2.6.4: 先停BLE扫描，再做MTU交换。给控制器100ms让
+     * ble_gap_update_params（在GAP CONNECT事件中发起）先走完，
+     * 避免两个L2CAP信令过程同时排队，降低控制器异常风险。 */
     crid_ble_scan_stop();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGW(TAG, "Disconnected during scan stop, aborting connect task");
         vTaskDelete(NULL);
         return;
+    }
+
+    /* v2.6.3: 主动发起 MTU 交换，请求 512 字节。
+     * 某些 Web Bluetooth 平台不主动协商 MTU，会卡在默认 23 字节。 */
+    int rc = ble_gattc_exchange_mtu(g_nus_conn_handle, NULL, NULL);
+    if (rc == 0) {
+        ESP_LOGI(TAG, "MTU exchange initiated");
+    } else {
+        ESP_LOGW(TAG, "MTU exchange failed: %d", rc);
     }
 
     ESP_LOGI(TAG, "BLE scan STOPPED for GATT connection");
@@ -731,29 +749,6 @@ crid_ble_init(void)
     return ESP_OK;
 }
 
-/* 将一行完整数据入队发送。以 [ZH] 开头的 LCD 专用消息直接丢弃。 */
-static void ble_enqueue_line(const char *line, size_t len) {
-    if (len == 0) return;
-    /* 过滤 LCD 中文摘要：[ZH]...[/ZH] */
-    if (len >= 4 && line[0] == '[' && line[1] == 'Z' && line[2] == 'H' && line[3] == ']') {
-        return;
-    }
-    if (len > BLE_TX_BUF_SIZE - 1) len = BLE_TX_BUF_SIZE - 1;
-
-    char *buf = (char *)malloc(len + 1);
-    if (!buf) return;
-    memcpy(buf, line, len);
-    buf[len] = '\0';
-
-    if (xQueueSend(g_ble_tx_queue, &buf, 0) != pdTRUE) {
-        /* v2.6.3: 改为非阻塞（0超时）。此函数在 portENTER_CRITICAL 内调用，
-         * 不能使用带超时的 xQueueSend，否则队列满时会在临界区内阻塞，
-         * 可能导致系统卡死或watchdog。 */
-        free(buf);
-        g_ble_queue_overflow_count++;
-    }
-}
-
 void
 crid_ble_write_cb(const char *data, size_t len, void *ctx)
 {
@@ -763,27 +758,54 @@ crid_ble_write_cb(const char *data, size_t len, void *ctx)
     if (!data || len == 0) return;
     if (g_nus_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
 
-    /* 行缓冲：多个 DAT_PRINTF 片段拼成完整一行（\n 结尾）后整体入队，
-     * 保证 JSON 原子性，不会被 SELF_GPS 等消息插队截断。 */
-    portENTER_CRITICAL(&g_ble_line_mux);
+    /* v2.6.4: 临界区内绝不调用 malloc / xQueueSend 等可能阻塞的函数。
+     * 做法：临界区内把完成行拷到栈上快照并重置行缓冲；
+     * 出临界区后再 malloc + xQueueSend。 */
+    char snapshot[BLE_TX_BUF_SIZE];
+
     for (size_t i = 0; i < len; i++) {
         char c = data[i];
-        if (c == '\n') {
-            /* 一行结束，入队 */
-            ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
-            g_ble_linebuf_len = 0;
-        } else if (c != '\r') {
+
+        if (c != '\n' && c != '\r') {
+            portENTER_CRITICAL(&g_ble_line_mux);
             if (g_ble_linebuf_len < sizeof(g_ble_linebuf) - 1) {
                 g_ble_linebuf[g_ble_linebuf_len++] = c;
-            } else {
-                /* 行太长，强制刷新 */
-                ble_enqueue_line(g_ble_linebuf, g_ble_linebuf_len);
-                g_ble_linebuf_len = 0;
-                g_ble_linebuf[g_ble_linebuf_len++] = c;
+            }
+            portEXIT_CRITICAL(&g_ble_line_mux);
+            continue;
+        }
+
+        if (c == '\r') continue;
+
+        /* \n：临界区内拷出快照并重置，避免出临界区后另一 task 追加
+         * 字符时与 memcpy 产生数据竞争。 */
+        size_t line_len = 0;
+        portENTER_CRITICAL(&g_ble_line_mux);
+        if (g_ble_linebuf_len > 0) {
+            line_len = g_ble_linebuf_len;
+            memcpy(snapshot, g_ble_linebuf, line_len);
+            g_ble_linebuf_len = 0;
+        }
+        portEXIT_CRITICAL(&g_ble_line_mux);
+
+        if (line_len > 0) {
+            /* 过滤 LCD 中文摘要 */
+            if (line_len >= 4 && snapshot[0] == '[' && snapshot[1] == 'Z' &&
+                snapshot[2] == 'H' && snapshot[3] == ']') {
+                continue;
+            }
+            if (line_len > BLE_TX_BUF_SIZE - 1) line_len = BLE_TX_BUF_SIZE - 1;
+            char *buf = (char *)malloc(line_len + 1);
+            if (buf) {
+                memcpy(buf, snapshot, line_len);
+                buf[line_len] = '\0';
+                if (xQueueSend(g_ble_tx_queue, &buf, 0) != pdTRUE) {
+                    free(buf);
+                    g_ble_queue_overflow_count++;
+                }
             }
         }
     }
-    portEXIT_CRITICAL(&g_ble_line_mux);
 }
 
 bool
