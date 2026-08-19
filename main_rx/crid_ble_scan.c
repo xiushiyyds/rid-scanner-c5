@@ -54,11 +54,12 @@ static volatile bool s_scan_allowed = true;
 
 /* ---- 扫描占空比模式 ---- */
 typedef enum {
-    SCAN_DUTY_HIGH,    /* 未连接：80% 占空比，高 RID 捕获率 */
-    SCAN_DUTY_LOW,     /* 已连接：40% 占空比，GATT 连接事件稳定 */
+    SCAN_DUTY_HIGH,          /* 空闲：80%，高 BLE RID 捕获率 */
+    SCAN_DUTY_LOW,           /* 已连接：40%，GATT 连接事件稳定 */
+    SCAN_DUTY_WIFI_LOCKED,   /* WiFi 目标锁定：10%，把空中时间让给 WiFi sniffer */
 } scan_duty_t;
 
-static volatile scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;  /* v2.5.9: 回退到80%，与v2.3.2一致 */
+static volatile scan_duty_t s_scan_duty = SCAN_DUTY_HIGH;
 
 /* ---- 前向声明 ---- */
 static int ble_scan_gap_event(struct ble_gap_event *event, void *arg);
@@ -226,11 +227,33 @@ static int ble_scan_gap_event(struct ble_gap_event *event, void *arg) {
  *
  * v2.1.0: 扫描参数根据 s_scan_duty 动态设置。
  *   HIGH: itvl=160(100ms), window=128(80ms) = 80% 占空比
- *   LOW:  itvl=160(100ms), window=64 (40ms) = 40% 占空比
+ * 占空比：
+ *   HIGH（空闲/未连接）：80%，window=80ms / itvl=100ms
+ *   LOW （已连接）：     40%，window=40ms / itvl=100ms
+ *   WIFI_LOCKED（WiFi目标锁定）：10%，window=10ms / itvl=100ms，
+ *                                让 WiFi sniffer 获得 90% 空中时间
  *
  * window < itvl 确保控制器在扫描间隙有时间处理 GATT 连接事件。
  * 这是 BLE 协议标准设计，与肩灯/手机同时扫描+连接的原理相同。
  * ================================================================ */
+static const char *duty_name(scan_duty_t d) {
+    switch (d) {
+    case SCAN_DUTY_HIGH:        return "HIGH 80%";
+    case SCAN_DUTY_LOW:         return "LOW 40%";
+    case SCAN_DUTY_WIFI_LOCKED: return "WIFI_LOCKED 10%";
+    }
+    return "?";
+}
+
+static uint16_t duty_window(scan_duty_t d) {
+    switch (d) {
+    case SCAN_DUTY_HIGH:        return 128;  /* 80ms  */
+    case SCAN_DUTY_LOW:         return 64;   /* 40ms  */
+    case SCAN_DUTY_WIFI_LOCKED: return 16;   /* 10ms  */
+    }
+    return 128;
+}
+
 static int start_scan(void) {
     struct ble_gap_disc_params disc_params = {0};
     int rc;
@@ -239,7 +262,7 @@ static int start_scan(void) {
     /* EXT_ADV=y 路径（当前 sdkconfig 关闭了 EXT_ADV，不会走到这里） */
     struct ble_gap_ext_disc_params uncoded_params = {0};
     uncoded_params.itvl = 160;
-    uncoded_params.window = (s_scan_duty == SCAN_DUTY_HIGH) ? 128 : 64;
+    uncoded_params.window = duty_window(s_scan_duty);
     uncoded_params.passive = 1;
 
     rc = ble_gap_ext_disc(BLE_OWN_ADDR_PUBLIC,
@@ -247,8 +270,7 @@ static int start_scan(void) {
                           &uncoded_params, NULL,
                           ble_scan_gap_event, NULL);
     if (rc == 0) {
-        ESP_LOGI(TAG, "BLE Extended scan started (duty=%s)",
-                 s_scan_duty == SCAN_DUTY_HIGH ? "HIGH 80%" : "LOW 40%");
+        ESP_LOGI(TAG, "BLE Extended scan started (duty=%s)", duty_name(s_scan_duty));
         return 0;
     }
     ESP_LOGW(TAG, "Extended scan failed (%d), falling back to legacy", rc);
@@ -257,15 +279,11 @@ static int start_scan(void) {
 #endif
 
     memset(&disc_params, 0, sizeof(disc_params));
-    if (s_scan_duty == SCAN_DUTY_HIGH) {
-        disc_params.itvl = 160;           /* 100ms */
-        disc_params.window = 128;         /* 80ms = 80% duty */
-        ESP_LOGI(TAG, "BLE scan started (HIGH duty 80%%, window=80ms/itvl=100ms)");
-    } else {
-        disc_params.itvl = 160;           /* 100ms */
-        disc_params.window = 64;          /* 40ms = 40% duty */
-        ESP_LOGI(TAG, "BLE scan started (LOW duty 40%%, window=40ms/itvl=100ms, GATT coexist)");
-    }
+    disc_params.itvl = 160;                              /* 100ms */
+    disc_params.window = duty_window(s_scan_duty);
+    ESP_LOGI(TAG, "BLE scan started (duty=%s, window=%ums/itvl=100ms)",
+             duty_name(s_scan_duty),
+             (unsigned)(disc_params.window * 10 / 16));
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
     disc_params.passive = 1;
@@ -364,4 +382,10 @@ void crid_ble_scan_set_duty_low(void) {
     if (s_scan_duty == SCAN_DUTY_LOW) return;
     s_scan_duty = SCAN_DUTY_LOW;
     ESP_LOGI(TAG, "Scan duty -> LOW (40% window=40ms/itvl=100ms, GATT coexist)");
+}
+
+void crid_ble_scan_set_duty_wifi_locked(void) {
+    if (s_scan_duty == SCAN_DUTY_WIFI_LOCKED) return;
+    s_scan_duty = SCAN_DUTY_WIFI_LOCKED;
+    ESP_LOGI(TAG, "Scan duty -> WIFI_LOCKED (10% window=10ms/itvl=100ms, WiFi priority)");
 }

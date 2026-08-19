@@ -45,6 +45,12 @@ void crid_ble_scan_set_allowed(bool allowed);
 void crid_ble_scan_set_duty_high(void);
 void crid_ble_scan_set_duty_low(void);
 
+/**
+ * WiFi 目标锁定时：10% 占空比，把空中时间让给 WiFi sniffer。
+ * 与 set_duty_high/low 相同，需要调用者 stop → delay → start 生效。
+ */
+void crid_ble_scan_set_duty_wifi_locked(void);
+
 #ifdef __cplusplus
 }
 #endif

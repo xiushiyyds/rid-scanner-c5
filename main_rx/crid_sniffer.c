@@ -4,7 +4,8 @@
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
  * v2.1.0: 删除 TDD 时分复用，WiFi 不再被应用层打断。
  * WiFi buffer 大幅削减以节省内部 SRAM。
- * 信道轮转：ch6 1500ms, ch1/ch11 各 250ms（v2.5.9 回退 v2.3.2）。
+ * 信道轮转：ch6 1500ms, ch1/ch11 各 250ms（v2.6.1 恢复 v2.3.2 时序）。
+ * v2.6.1: 锁定 WiFi 目标时 BLE 占空比切到 10%，给 WiFi sniffer 让空中时间。
  */
 
 #include <string.h>
@@ -20,6 +21,8 @@
 #include "freertos/task.h"
 #include "crid_sniffer.h"
 #include "crid_json.h"
+#include "crid_ble_scan.h"
+#include "crid_ble.h"
 #include "opendroneid.h"
 #include "dji_droneid.h"
 
@@ -214,17 +217,17 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ================================================================
- 信道轮转（v2.6.0 自适应信道锁定）
+ 信道轮转（v2.6.1 自适应信道锁定 + BLE 占空比联动）
 
- 无目标时：ch6 1000ms / ch1 250ms / ch11 250ms，周期 1.5s。
- 发现目标后：锁定目标所在信道持续监听，不再轮巡。
- 目标全部超时消失后：恢复轮巡。
+ 无目标时：ch6 1500ms / ch1 250ms / ch11 250ms，周期 2.0s。
+ 发现目标后：锁定目标所在信道持续监听，同时 BLE 占空比从 80% 降到 10%，
+            把 90% 空中时间让给 WiFi sniffer，显著提高包接收率和 RSSI 刷新率。
+ 目标全部超时消失后：恢复轮巡 + BLE 80% 占空比。
 
  绝大多数 WiFi RID 设备（DJI/Parrot 等）固定使用 ch6。
- 自适应锁定避免发现目标后还在切信道导致丢包。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 250, 250};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 250, 250};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 static volatile uint8_t s_locked_channel = 0;  /* 0=未锁定，非0=锁定信道 */
@@ -287,10 +290,26 @@ static void channel_hold_task(void *pvParameter) {
                 s_locked_channel = lock_ch;
                 snprintf(msg, sizeof(msg), "Adaptive lock: ch%u (target found)", lock_ch);
                 json_debug("RID_SNIFF", msg);
+                /* 锁定 WiFi 目标时，把 BLE 扫描占空比降到 10%，
+                 * 让 WiFi sniffer 获得 90% 空中时间。手机已连接时
+                 * BLE 扫描已停，不做操作。 */
+                if (!crid_ble_is_connected()) {
+                    crid_ble_scan_set_duty_wifi_locked();
+                    crid_ble_scan_stop();
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    crid_ble_scan_start();
+                }
             } else if (s_locked_channel != 0) {
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
+                /* 解锁后恢复 BLE 80% 占空比 */
+                if (!crid_ble_is_connected()) {
+                    crid_ble_scan_set_duty_high();
+                    crid_ble_scan_stop();
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    crid_ble_scan_start();
+                }
             }
         }
 
