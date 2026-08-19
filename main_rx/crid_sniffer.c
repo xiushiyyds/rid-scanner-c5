@@ -8,6 +8,8 @@
  * v2.6.1: 锁定 WiFi 目标时 BLE 占空比切到 10%，给 WiFi sniffer 让空中时间。
  * v2.6.2: 锁定时完全停止 BLE 扫描（100% WiFi 空中时间）；修复重复 set_channel
  *         导致的周期性丢包；修复 get_best_lock_channel 未检查 active 标志。
+ * v2.6.3: 锁定超时 30s→10s（目标消失后更快恢复扫描）；移除无用 Beacon 采样和
+ *         SSID 字段（省 ~2KB 内部 SRAM + ISR 时间）。
  */
 
 #include <string.h>
@@ -255,7 +257,8 @@ static uint8_t get_best_lock_channel(void) {
          * 但 mac[] 不会被清零，旧代码只检查 mac[0]||mac[1] 会选到已失效条目。 */
         if (!table[i].active) continue;
         uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        if (now - table[i].last_seen_ms >= 30000) continue;
+        /* v2.6.3: 锁定超时从30s缩短到10s。目标消失后更快恢复全信道扫描。 */
+        if (now - table[i].last_seen_ms >= 10000) continue;
         /* 只锁定 WiFi 目标（channel != 0）。BLE 源 channel=0 不应该
          * 触发 WiFi 信道锁定，否则会把 BLE 目标错误地锁到 ch6。 */
         uint8_t ch = table[i].last_channel & 0x7F;
@@ -272,7 +275,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.2: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
+             "Channel rotation v2.6.3: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));

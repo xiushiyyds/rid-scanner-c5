@@ -460,6 +460,16 @@ static void ble_send_welcome_task(void *arg) {
 static void ble_connect_task(void *arg) {
     (void)arg;
 
+    /* v2.6.3: 主动发起 MTU 交换，请求 512 字节。
+     * 某些 Web Bluetooth 平台不主动协商 MTU，会卡在默认 23 字节，
+     * 每条 JSON 要分十几片，延迟和丢包风险大增。 */
+    if (g_nus_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        int rc = ble_gattc_exchange_mtu(g_nus_conn_handle, NULL, NULL);
+        if (rc == 0) {
+            ESP_LOGI(TAG, "MTU exchange initiated");
+        }
+    }
+
     /* v2.1.4: 连接期间完全停止 BLE RID 扫描。 */
     crid_ble_scan_stop();
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -735,7 +745,10 @@ static void ble_enqueue_line(const char *line, size_t len) {
     memcpy(buf, line, len);
     buf[len] = '\0';
 
-    if (xQueueSend(g_ble_tx_queue, &buf, pdMS_TO_TICKS(20)) != pdTRUE) {
+    if (xQueueSend(g_ble_tx_queue, &buf, 0) != pdTRUE) {
+        /* v2.6.3: 改为非阻塞（0超时）。此函数在 portENTER_CRITICAL 内调用，
+         * 不能使用带超时的 xQueueSend，否则队列满时会在临界区内阻塞，
+         * 可能导致系统卡死或watchdog。 */
         free(buf);
         g_ble_queue_overflow_count++;
     }

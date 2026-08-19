@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.2"
+#define CRID_VERSION_STRING "2.6.3"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -512,7 +512,10 @@ static void gps_report_task(void *arg) {
             snprintf(buf, sizeof(buf), "SELF_GPS:%.6f,%.6f,%.1f,%d,%.1f\n",
                      gd.latitude, gd.longitude, gd.altitude, gd.satellites, gd.hdop);
         } else {
-            snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,0\n");
+            /* v2.6.3: 未定位时也发送卫星数和HDOP，让网页显示"搜索中(N星)"
+             * 而不是"搜索中(0星)"。之前只发4个0导致网页解析sats=0。 */
+            snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,%d,%.1f\n",
+                     gd.satellites, gd.hdop);
         }
         crid_ble_write_cb(buf, strlen(buf), NULL);
         vTaskDelay(pdMS_TO_TICKS(3000));

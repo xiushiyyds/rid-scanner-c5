@@ -216,13 +216,15 @@ static void parse_rmc(const char *sentence)
     if (strlen(fields[4]) >= 5 && strlen(fields[5]) >= 1) {
         pending.longitude = parse_nmea_lon(fields[4], fields[5]);
     }
-    
+
     // Field 7: Speed in knots
     pending.speed_knots = atof(fields[6]);
-    
-    pending.valid = true;
-    
-    // 原子性提交
+
+    /* v2.6.3: 不能仅凭 RMC status=A 就设 valid=true。
+     * GGA 是定位质量的权威来源（fix_quality > 0 且 sats >= 3）。
+     * RMC 的 A/V 标志可能在仅有1-2颗星时仍为 A，导致假定位。
+     * 保留 pending 中从 GGA 继承的 valid 状态，不覆盖。 */
+
     taskENTER_CRITICAL(&gps_spinlock);
     gps_state = pending;
     taskEXIT_CRITICAL(&gps_spinlock);
