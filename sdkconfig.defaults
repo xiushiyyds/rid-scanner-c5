@@ -98,6 +98,11 @@ CONFIG_ESP32C5_REV_MIN_1=y
 # 主任务栈
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# v2.6.4: NimBLE host 任务栈 4096→6144。
+# DISCONNECT 事件处理中 crid_ble_write_cb 有 1024B 栈快照，
+# 加上 NimBLE 框架自身调用深度，默认 4096 余量不足。
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+
 # 自定义分区表
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partition_table/partitionTable.csv"
