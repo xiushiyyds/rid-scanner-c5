@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/idf_additions.h"
 
 #include "freertos/task.h"
@@ -213,19 +214,20 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 /* ================================================================
- 信道轮转（三信道轮巡）
+ 信道轮转（v2.6.0 自适应信道锁定）
 
- WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
- 不再依赖应用层 TDD（v2.1.0 删除）。
+ 无目标时：ch6 1000ms / ch1 250ms / ch11 250ms，周期 1.5s。
+ 发现目标后：锁定目标所在信道持续监听，不再轮巡。
+ 目标全部超时消失后：恢复轮巡。
 
- ch6 驻留 1500ms（多数无人机默认信道，75%占比），
- ch1/ch11 各驻留 250ms（覆盖非默认信道）。
- 周期 2.0 秒，ch6 占 75%，ch1/ch11 各占 12.5%。
+ 绝大多数 WiFi RID 设备（DJI/Parrot 等）固定使用 ch6。
+ 自适应锁定避免发现目标后还在切信道导致丢包。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 250, 250};  /* v2.5.9: 回退v2.3.2 */
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 250, 250};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
+static volatile uint8_t s_locked_channel = 0;  /* 0=未锁定，非0=锁定信道 */
 
 uint8_t crid_sniffer_get_current_channel(void) {
     return s_current_channel;
@@ -235,10 +237,35 @@ uint8_t crid_sniffer_get_current_channel(void) {
 static volatile bool s_hold_should_stop = false;
 static TaskHandle_t s_hold_task_handle = NULL;
 
+/* 判断是否有活跃目标，并找出最近的信道（用于锁定） */
+static uint8_t get_best_lock_channel(void) {
+    extern uav_track_t *crid_tracker_get_table(void);
+    uav_track_t *table = crid_tracker_get_table();
+    if (!table) return 0;
+
+    uint8_t best_ch = 0;
+    uint32_t best_last_seen = 0;
+    for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
+        if (table[i].mac[0] || table[i].mac[1]) {
+            uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+            if (now - table[i].last_seen_ms < 30000) {
+                /* 活跃目标，取最近更新的那个的信道 */
+                if (table[i].last_seen_ms > best_last_seen) {
+                    best_last_seen = table[i].last_seen_ms;
+                    best_ch = table[i].last_channel & 0x7F;
+                    if (best_ch == 0) best_ch = 6;  /* BLE 源(ch=0)默认 ch6 */
+                }
+            }
+        }
+    }
+    return best_ch;
+}
+
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
-    char msg[80];
-    snprintf(msg, sizeof(msg), "Channel rotation: ch6 1.5s / ch1,ch11 250ms (75%% ch6)");
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "Channel rotation v2.6.0: ch6 1.0s / ch1,ch11 250ms (adaptive lock)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -253,12 +280,34 @@ static void channel_hold_task(void *pvParameter) {
     uint32_t last_total = 0, last_rid = 0, last_beacon = 0;
 
     while (!s_hold_should_stop) {
-        uint8_t ch = SCAN_CHANNELS[idx];
-        uint16_t dwell = CHANNEL_DWELL_MS_ARR[idx];
+        /* 自适应：检查是否需要锁定/解锁 */
+        uint8_t lock_ch = get_best_lock_channel();
+        if (lock_ch != s_locked_channel) {
+            if (lock_ch != 0) {
+                s_locked_channel = lock_ch;
+                snprintf(msg, sizeof(msg), "Adaptive lock: ch%u (target found)", lock_ch);
+                json_debug("RID_SNIFF", msg);
+            } else if (s_locked_channel != 0) {
+                snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
+                json_debug("RID_SNIFF", msg);
+                s_locked_channel = 0;
+            }
+        }
 
-        /* v2.5.9: 与 v2.3.2 一致——先标记信道再 set_channel。
-         * BLE PTA 可能使 set_channel 短暂失败，但 WiFi 会在下次重试，
-         * LCD 显示轮巡节奏即可，不阻塞主循环。 */
+        uint8_t ch;
+        uint16_t dwell;
+
+        if (s_locked_channel != 0) {
+            /* 锁定状态：持续在目标信道上 */
+            ch = s_locked_channel;
+            dwell = 200;  /* 每 200ms 检查一次是否还需要锁定 */
+        } else {
+            /* 轮巡状态 */
+            ch = SCAN_CHANNELS[idx];
+            dwell = CHANNEL_DWELL_MS_ARR[idx];
+            idx = (idx + 1) % SCAN_CHANNEL_COUNT;
+        }
+
         s_current_channel = ch;
 
         esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
@@ -266,7 +315,6 @@ static void channel_hold_task(void *pvParameter) {
             snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
             json_warning("RID_SNIFF", msg);
         }
-        idx = (idx + 1) % SCAN_CHANNEL_COUNT;
 
         /* 分段 delay，stop 时能快速退出 */
         for (int i = 0; i < (dwell / 50) && !s_hold_should_stop; i++) {
@@ -288,11 +336,12 @@ static void channel_hold_task(void *pvParameter) {
             last_rid = cur_rid;
             last_beacon = cur_beacon;
             snprintf(msg, sizeof(msg),
-                     "Diag: total=%lu(+%lu) mgmt=+%lu RID=%lu(+%lu) ch=%u",
+                     "Diag: total=%lu(+%lu) mgmt=+%lu RID=%lu(+%lu) ch=%u%s",
                      (unsigned long)cur_total, (unsigned long)d_total,
                      (unsigned long)d_beacon,
                      (unsigned long)cur_rid, (unsigned long)d_rid,
-                     s_current_channel);
+                     s_current_channel,
+                     s_locked_channel ? " LOCKED" : "");
             json_debug("RID_SNIFF", msg);
         }
     }
