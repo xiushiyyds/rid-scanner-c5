@@ -278,10 +278,10 @@ typedef struct {
 #define MAX_TRACKED_UAVS        30         // 最多同时追踪的无人机数量
 #define SNIFFER_QUEUE_SIZE      64          // sniffer 消息队列深度
 #define PARSER_TASK_STACK       10240       // 解析任务栈大小（v2.6.4: 8192→10240，防止深度调用栈溢出）
-#define MONITOR_TASK_STACK      4096        // 监控任务栈大小
+#define MONITOR_TASK_STACK      6144        // 监控任务栈大小（v2.6.4: 4096→6144，json BPRINTF 1KB + write_cb snapshot 1KB）
 #define PARSER_TASK_PRIO        4           // 解析任务优先级
 #define MONITOR_TASK_PRIO       3           // 监控任务优先级
-#define CH_HOLD_TASK_STACK      3072        // 信道保持任务栈大小
+#define CH_HOLD_TASK_STACK      4096        // 信道保持任务栈大小（v2.6.4: 3072→4096，json_debug BPRINTF+write_cb snapshot）
 #define CH_HOLD_TASK_PRIO       2           /* v2.5.9: 回退到v2.3.2的值 */
 
 // 锁定监听信道
