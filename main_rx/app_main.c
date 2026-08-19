@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.1"
+#define CRID_VERSION_STRING "2.6.2"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -294,7 +294,10 @@ static void parser_task(void *pvParameter) {
                 uav->last_push_ms = esp_log_timestamp();
             } else if (uav->basic_id.valid || uav->location.valid) {
                 uint32_t now = esp_log_timestamp();
-                if (now - uav->last_push_ms >= 1000) {
+                /* v2.6.2: 推送节流从 1000ms 降到 500ms，雷达 RSSI 刷新率翻倍。
+                 * RID 广播约 1Hz，但锁定后 sniffer 包接收率高，500ms 节流
+                 * 确保每次收到新包都能及时推送，雷达跟手度显著改善。 */
+                if (now - uav->last_push_ms >= 500) {
                     uav->last_push_ms = now;
                     json_uav_update(uav);
                 }
@@ -430,7 +433,8 @@ static void parser_task(void *pvParameter) {
             uav->last_push_ms = esp_log_timestamp();
         } else if (uav->basic_id.valid || uav->location.valid) {
             uint32_t now = esp_log_timestamp();
-            if (now - uav->last_push_ms >= 1000) {
+            /* v2.6.2: 500ms 节流（原 1000ms），雷达 RSSI 更新翻倍 */
+            if (now - uav->last_push_ms >= 500) {
                 uav->last_push_ms = now;
                 json_uav_update(uav);
             }

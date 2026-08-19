@@ -276,7 +276,7 @@ typedef struct {
  * ================================================================ */
 
 #define MAX_TRACKED_UAVS        30         // 最多同时追踪的无人机数量
-#define SNIFFER_QUEUE_SIZE      32          // sniffer 消息队列深度
+#define SNIFFER_QUEUE_SIZE      64          // sniffer 消息队列深度
 #define PARSER_TASK_STACK       8192        // 解析任务栈大小
 #define MONITOR_TASK_STACK      4096        // 监控任务栈大小
 #define PARSER_TASK_PRIO        4           // 解析任务优先级

@@ -6,6 +6,8 @@
  * WiFi buffer 大幅削减以节省内部 SRAM。
  * 信道轮转：ch6 1500ms, ch1/ch11 各 250ms（v2.6.1 恢复 v2.3.2 时序）。
  * v2.6.1: 锁定 WiFi 目标时 BLE 占空比切到 10%，给 WiFi sniffer 让空中时间。
+ * v2.6.2: 锁定时完全停止 BLE 扫描（100% WiFi 空中时间）；修复重复 set_channel
+ *         导致的周期性丢包；修复 get_best_lock_channel 未检查 active 标志。
  */
 
 #include <string.h>
@@ -249,16 +251,18 @@ static uint8_t get_best_lock_channel(void) {
     uint8_t best_ch = 0;
     uint32_t best_last_seen = 0;
     for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
-        if (table[i].mac[0] || table[i].mac[1]) {
-            uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-            if (now - table[i].last_seen_ms < 30000) {
-                /* 活跃目标，取最近更新的那个的信道 */
-                if (table[i].last_seen_ms > best_last_seen) {
-                    best_last_seen = table[i].last_seen_ms;
-                    best_ch = table[i].last_channel & 0x7F;
-                    if (best_ch == 0) best_ch = 6;  /* BLE 源(ch=0)默认 ch6 */
-                }
-            }
+        /* v2.6.2: 必须检查 active 标志。MAC 合并去重后 slot 的 active=false
+         * 但 mac[] 不会被清零，旧代码只检查 mac[0]||mac[1] 会选到已失效条目。 */
+        if (!table[i].active) continue;
+        uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        if (now - table[i].last_seen_ms >= 30000) continue;
+        /* 只锁定 WiFi 目标（channel != 0）。BLE 源 channel=0 不应该
+         * 触发 WiFi 信道锁定，否则会把 BLE 目标错误地锁到 ch6。 */
+        uint8_t ch = table[i].last_channel & 0x7F;
+        if (ch == 0) continue;
+        if (table[i].last_seen_ms > best_last_seen) {
+            best_last_seen = table[i].last_seen_ms;
+            best_ch = ch;
         }
     }
     return best_ch;
@@ -268,7 +272,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.0: ch6 1.0s / ch1,ch11 250ms (adaptive lock)");
+             "Channel rotation v2.6.2: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -290,14 +294,13 @@ static void channel_hold_task(void *pvParameter) {
                 s_locked_channel = lock_ch;
                 snprintf(msg, sizeof(msg), "Adaptive lock: ch%u (target found)", lock_ch);
                 json_debug("RID_SNIFF", msg);
-                /* 锁定 WiFi 目标时，把 BLE 扫描占空比降到 10%，
-                 * 让 WiFi sniffer 获得 90% 空中时间。手机已连接时
-                 * BLE 扫描已停，不做操作。 */
+                /* v2.6.2: 锁定 WiFi 目标时完全停止 BLE 扫描，
+                 * 让 WiFi sniffer 独占 100% 空中时间，最大化包接收率。
+                 * 手机已连接时 BLE 扫描本就已停，不做操作。
+                 * 解锁后恢复 BLE 80% 占空比扫描。 */
                 if (!crid_ble_is_connected()) {
-                    crid_ble_scan_set_duty_wifi_locked();
                     crid_ble_scan_stop();
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    crid_ble_scan_start();
+                    ESP_LOGI(TAG, "BLE scan stopped for WiFi lock (100% airtime)");
                 }
             } else if (s_locked_channel != 0) {
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
@@ -327,12 +330,16 @@ static void channel_hold_task(void *pvParameter) {
             idx = (idx + 1) % SCAN_CHANNEL_COUNT;
         }
 
-        s_current_channel = ch;
-
-        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-        if (ret != ESP_OK && !s_hold_should_stop) {
-            snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
-            json_warning("RID_SNIFF", msg);
+        /* v2.6.2: 只有信道真正变化时才调用 set_channel。
+         * 锁定状态下每 200ms 循环一次，如果信道没变就不调，
+         * 避免重复 set_channel 导致射频重新校准、周期性丢包。 */
+        if (ch != s_current_channel) {
+            s_current_channel = ch;
+            esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            if (ret != ESP_OK && !s_hold_should_stop) {
+                snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
+                json_warning("RID_SNIFF", msg);
+            }
         }
 
         /* 分段 delay，stop 时能快速退出 */

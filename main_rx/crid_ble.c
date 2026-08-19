@@ -236,11 +236,13 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
              * 必须在独立 task 中做 stop/restart（不能在 host task 阻塞）。 */
             xTaskCreate(ble_connect_task, "ble_connect", 2048, NULL, 5, NULL);
 
-            /* 宽松连接间隔 30~50ms */
+            /* v2.6.2: 连接间隔收紧到 15~30ms（原 30~50ms），latency=0，
+             * 让 notify 数据更快到达手机，雷达 RSSI 更新延迟降低一半。
+             * 功耗略增但侦测设备插电/电池充足，可接受。 */
             struct ble_gap_upd_params params = {
-                .itvl_min = 24,
-                .itvl_max = 40,
-                .latency = 1,
+                .itvl_min = 12,   /* 15ms */
+                .itvl_max = 24,   /* 30ms */
+                .latency = 0,
                 .supervision_timeout = 400,
                 .min_ce_len = 0,
                 .max_ce_len = 0,
