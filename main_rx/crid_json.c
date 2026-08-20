@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "opendroneid.h"
 #include "crid_json.h"
@@ -30,10 +32,32 @@
 static json_write_cb_t g_data_write_cb = NULL;  // 数据流回调（UAV 数据、状态统计）
 static void *g_data_write_ctx = NULL;            // 回调上下文
 
+/* v2.6.8: 保护 stdout 写入的互斥锁。
+ * parser/monitor/gps_rpt 三个任务都会调 data_write，
+ * 无锁时 fwrite 字节交错会导致 JSON 被 [ZH] 行截断。
+ * 锁内只做 stdout 写入，不调 g_data_write_cb（其内部有队列操作不能持锁）。 */
+static SemaphoreHandle_t s_stdout_mux = NULL;
+
+static inline void stdout_lock(void) {
+    if (!s_stdout_mux) s_stdout_mux = xSemaphoreCreateMutex();
+    if (s_stdout_mux) xSemaphoreTake(s_stdout_mux, portMAX_DELAY);
+}
+static inline void stdout_unlock(void) {
+    if (s_stdout_mux) xSemaphoreGive(s_stdout_mux);
+}
+
 // 数据流：输出到 stdout（带 DATA: 前缀，方便 Web Serial 过滤日志）+ 可选回调
 static inline void data_write(const char *str, size_t len) {
-    fwrite("DATA:", 1, 5, stdout);
-    fwrite(str, 1, len, stdout);
+    /* [ZH]...[/ZH] 是给 LCD 用的中文摘要，BLE 侧已过滤，
+     * 也不写入 stdout/USB，避免污染 JSON 数据流和手机端日志。 */
+    bool is_lcd_zh = (len >= 4 && str[0] == '[' && str[1] == 'Z' &&
+                      str[2] == 'H' && str[3] == ']');
+    if (!is_lcd_zh) {
+        stdout_lock();
+        fwrite("DATA:", 1, 5, stdout);
+        fwrite(str, 1, len, stdout);
+        stdout_unlock();
+    }
     if (g_data_write_cb) {
         g_data_write_cb(str, len, g_data_write_ctx);
     }
@@ -41,7 +65,9 @@ static inline void data_write(const char *str, size_t len) {
 
 // 调试流：仅输出到 stdout
 static inline void debug_write(const char *str, size_t len) {
+    stdout_lock();
     fwrite(str, 1, len, stdout);
+    stdout_unlock();
 }
 
 void json_set_data_write_cb(json_write_cb_t cb, void *ctx) {
