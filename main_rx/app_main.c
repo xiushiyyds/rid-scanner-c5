@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.4"
+#define CRID_VERSION_STRING "2.6.6"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -708,7 +708,26 @@ void app_main(void) {
         return;
     }
 
-    // 9-11. 创建所有任务（在 WiFi init 之前分配栈，避免内存碎片）
+    /* v2.6.6: WiFi init 必须在创建应用任务之前。
+     * v2.6.4 把 parser/monitor/NimBLE host 栈加大后，应用任务先创建会吃掉
+     * 连续内部 SRAM，导致 esp_wifi_init 分配 10×1700B DMA 接收缓冲时
+     * 返回 ESP_ERR_NO_MEM，sniffer 初始化失败，信道轮转永远跑不起来。
+     * WiFi 驱动需要大块连续 DMA 内存，必须最先抢占。 */
+    ESP_LOGI("RID_MAIN", "Initializing Wi-Fi BEFORE app tasks (internal_free=%u largest=%u)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    ret = crid_sniffer_init();
+    if (ret != ESP_OK) {
+        json_error("RID_MAIN", "Sniffer init failed!");
+        return;
+    }
+
+    ESP_LOGI("RID_MAIN", "Wi-Fi init OK, now creating app tasks (internal_free=%u largest=%u)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    // 9-11. 创建应用任务（WiFi 已占住 DMA 内存，剩余内存给任务栈）
     BaseType_t task_created;
 
     task_created = xTaskCreate(parser_task, "parser",
@@ -728,13 +747,6 @@ void app_main(void) {
     /* v2.6.4: 栈 3072→4096。crid_ble_write_cb 内部有 1024 字节栈快照，
      * 加上本任务的 96 字节 buf 和调用帧，3072 偏紧。 */
     xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 4096, NULL, 3, NULL, 0);
-
-    // 12. WiFi 最后初始化（自定义 config 削减 buffer，节省内部 SRAM）
-    ret = crid_sniffer_init();
-    if (ret != ESP_OK) {
-        json_error("RID_MAIN", "Sniffer init failed!");
-        return;
-    }
 
     // 13. 启动信道轮转（BLE 持续扫描，WiFi 共存硬件自动分时）
     crid_sniffer_start_channel_hold();
