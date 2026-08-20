@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.6"
+#define CRID_VERSION_STRING "2.6.7"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -708,14 +708,17 @@ void app_main(void) {
         return;
     }
 
-    /* v2.6.6: WiFi init 必须在创建应用任务之前。
+    /* v2.6.7: WiFi init 必须在创建应用任务之前。
      * v2.6.4 把 parser/monitor/NimBLE host 栈加大后，应用任务先创建会吃掉
      * 连续内部 SRAM，导致 esp_wifi_init 分配 10×1700B DMA 接收缓冲时
      * 返回 ESP_ERR_NO_MEM，sniffer 初始化失败，信道轮转永远跑不起来。
      * WiFi 驱动需要大块连续 DMA 内存，必须最先抢占。 */
-    ESP_LOGI("RID_MAIN", "Initializing Wi-Fi BEFORE app tasks (internal_free=%u largest=%u)",
+    char mem_dbg[96];
+    snprintf(mem_dbg, sizeof(mem_dbg),
+             "WiFi init before app tasks: internal_free=%u largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    json_debug("RID_MAIN", mem_dbg);
 
     ret = crid_sniffer_init();
     if (ret != ESP_OK) {
@@ -723,9 +726,11 @@ void app_main(void) {
         return;
     }
 
-    ESP_LOGI("RID_MAIN", "Wi-Fi init OK, now creating app tasks (internal_free=%u largest=%u)",
+    snprintf(mem_dbg, sizeof(mem_dbg),
+             "WiFi init OK, creating app tasks: internal_free=%u largest=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    json_debug("RID_MAIN", mem_dbg);
 
     // 9-11. 创建应用任务（WiFi 已占住 DMA 内存，剩余内存给任务栈）
     BaseType_t task_created;
