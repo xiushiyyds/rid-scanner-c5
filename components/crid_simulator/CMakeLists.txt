@@ -6,7 +6,7 @@
 
 if(CONFIG_RID_SCANNER_BUILD_SIMULATOR)
     idf_component_register(
-        SRCS sim_core.c sim_encode.c sim_wifi.c sim_patrol.c sim_lcd_ui.c
+        SRCS sim_core.c sim_encode.c sim_encode_gb46750.c sim_wifi.c sim_patrol.c sim_lcd_ui.c
         INCLUDE_DIRS "include"
         REQUIRES esp_wifi nvs_flash esp_netif esp_event esp_timer driver
                  esp_driver_gpio esp_hw_support lcd_display crid_common

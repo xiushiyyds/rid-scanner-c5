@@ -67,6 +67,15 @@ typedef enum {
 } sim_chan_mode_t;
 
 /* ================================================================
+ * 广播协议选择 (v2.7.0)
+ * ================================================================ */
+typedef enum {
+    SIM_PROTO_GB42590 = 0,  /* GB42590-2023 旧国标 (ASTM packed) */
+    SIM_PROTO_GB46750 = 1,  /* GB46750-2025 新国标 (变长 TLV) */
+    SIM_PROTO_MIXED   = 2,  /* 双发轮替：每 tick 切换一种 */
+} sim_protocol_t;
+
+/* ================================================================
  * 模拟器配置（v2.6.0 扩展）
  * ================================================================ */
 typedef struct {
@@ -85,6 +94,7 @@ typedef struct {
     /* v2.6.0 扩展 */
     sim_brand_t brand;             /* 品牌/协议 */
     sim_chan_mode_t chan_mode;     /* 信道模式 */
+    sim_protocol_t protocol;       /* 广播协议 (v2.7.0) */
     int frame_interval_ms;         /* 每架帧间隔 ms（默认 5） */
     int round_interval_ms;         /* 轮间隔 ms（默认 1000） */
     int city_index;                /* 城市索引（-1=自定义坐标） */
@@ -102,6 +112,7 @@ typedef struct {
     sim_state_t state;
     sim_brand_t brand;
     sim_chan_mode_t chan_mode;
+    sim_protocol_t protocol;
     float speed;
     double base_lat;
     double base_lon;
@@ -127,6 +138,7 @@ void sim_get_default_config(sim_config_t *config);
 const char *sim_flight_mode_name(sim_flight_mode_t mode);
 const char *sim_brand_name(sim_brand_t brand);
 const char *sim_chan_mode_name(sim_chan_mode_t mode);
+const char *sim_protocol_name(sim_protocol_t proto);
 
 /* v2.6.0 运行时控制（CLI 调用） */
 void sim_set_count(int count);
@@ -135,6 +147,7 @@ void sim_set_center(double lat, double lon);
 void sim_set_channel(uint8_t ch);
 void sim_set_brand(sim_brand_t brand);
 void sim_set_chan_mode(sim_chan_mode_t mode);
+void sim_set_protocol(sim_protocol_t proto);
 void sim_get_stats(sim_stats_t *out);
 
 /* 串口 CLI 处理：解析一行命令，返回是否已处理 */

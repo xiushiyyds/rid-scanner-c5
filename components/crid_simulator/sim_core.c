@@ -30,6 +30,7 @@
 
 #include "sim_core.h"
 #include "sim_encode.h"
+#include "sim_encode_gb46750.h"
 #include "sim_wifi.h"
 #include "sim_patrol.h"
 #include "drone_sn_db.h"
@@ -106,6 +107,7 @@ typedef struct {
     double op_lon_offset;
     uint8_t channel;
     sim_brand_t brand;
+    char upc[GB46750_UPC_LEN + 1];  /* v2.7.0: GB46750 UPC (20 chars) */
 } sim_target_t;
 
 static EXT_RAM_BSS_ATTR sim_target_t s_targets[SIM_MAX_TARGETS];
@@ -133,6 +135,15 @@ const char *sim_chan_mode_name(sim_chan_mode_t m) {
     }
 }
 
+const char *sim_protocol_name(sim_protocol_t p) {
+    switch (p) {
+        case SIM_PROTO_GB42590: return "GB42590";
+        case SIM_PROTO_GB46750: return "GB46750";
+        case SIM_PROTO_MIXED:   return "Mixed";
+        default:                return "?";
+    }
+}
+
 /* ================================================================
  * 默认配置
  * ================================================================ */
@@ -153,6 +164,7 @@ void sim_get_default_config(sim_config_t *config) {
     strncpy(config->ssid, "RID-SIM-C5", sizeof(config->ssid) - 1);
     config->brand = SIM_BRAND_MIXED;
     config->chan_mode = SIM_CHAN_ROTATE_1_6_11;
+    config->protocol = SIM_PROTO_GB42590;  /* 默认旧国标，不回归 */
     config->frame_interval_ms = 3;
     config->round_interval_ms = 1000;
     config->city_index = 12;
@@ -253,6 +265,9 @@ static void init_targets(int target_count) {
         t->sn_entry = pick_sn_entry(t->brand);
         generate_realistic_sn(t->uas_id, sizeof(t->uas_id), t->sn_entry);
 
+        /* v2.7.0: 为 GB46750 预生成 20 位 UPC */
+        sim_gb46750_gen_upc(t->brand, (uint32_t)i, t->upc, sizeof(t->upc));
+
         float angle_rand = (float)((esp_random() % 36000) / 100.0f);
         float dist_rand = (float)((esp_random() % 2000) / 1000.0f);
         t->base_lat_offset = 0.001 * dist_rand * cosf(angle_rand * 3.14159f / 180.0f);
@@ -340,7 +355,9 @@ static esp_err_t nvs_load_config(sim_config_t *cfg) {
     size_t size = sizeof(sim_config_t);
     err = nvs_get_blob(handle, "sim_cfg", cfg, &size);
     nvs_close(handle);
-    if (err != ESP_OK) {
+    if (err != ESP_OK || size != sizeof(sim_config_t)) {
+        /* v2.7.0: 结构体新增 protocol 字段，旧 NVS blob 尺寸不匹配，
+         * 走默认值避免读取越界/字段错位 */
         sim_get_default_config(cfg);
     } else {
         if (cfg->target_count < 1 || cfg->target_count > SIM_MAX_TARGETS)
@@ -348,6 +365,9 @@ static esp_err_t nvs_load_config(sim_config_t *cfg) {
         if (cfg->tx_power < 0) cfg->tx_power = 20;
         if (cfg->frame_interval_ms <= 0) cfg->frame_interval_ms = 5;
         if (cfg->round_interval_ms <= 0) cfg->round_interval_ms = 1000;
+        /* 兜底：protocol 枚举越界（异常 NVS）*/
+        if (cfg->protocol > SIM_PROTO_MIXED)
+            cfg->protocol = SIM_PROTO_GB42590;
     }
     return err;
 }
@@ -381,15 +401,19 @@ static inline bool tx_send_one(int i, uint8_t *frame_buf) {
     t->current_lon = lon;
     t->current_heading = heading;
 
+    /* 读取当前协议选择（v2.7.0） */
+    sim_protocol_t proto;
     if (s_config_mutex) xSemaphoreTake(s_config_mutex, portMAX_DELAY);
     build_target_encode_config(t, &s_sim_config, lat, lon, heading,
                                s_sim_config.speed);
+    proto = s_sim_config.protocol;
+    if (s_config_mutex) xSemaphoreGive(s_config_mutex);
+
     float alt_wave = 3.0f * sinf((float)(s_tx_count + i * 7) * 0.1f);
     t->encode_cfg.altitude_msl += alt_wave;
     t->encode_cfg.altitude_agl += alt_wave;
     float spd_wave = 0.9f + 0.1f * sinf((float)(s_tx_count + i * 13) * 0.05f);
     t->encode_cfg.speed_horizontal *= spd_wave;
-    if (s_config_mutex) xSemaphoreGive(s_config_mutex);
 
     if (i == 0) {
         s_current_lat = lat;
@@ -399,10 +423,28 @@ static inline bool tx_send_one(int i, uint8_t *frame_buf) {
 
     uint16_t frame_len = 0;
     uint8_t mc = s_msg_counter++;
-    if (!sim_encode_beacon_frame(&t->encode_cfg, mc, frame_buf,
-                                  SIM_FRAME_BUF_SIZE, &frame_len)) {
-        return false;
+    bool ok;
+
+    if (proto == SIM_PROTO_GB46750) {
+        ok = sim_encode_gb46750_beacon_frame(&t->encode_cfg, t->upc,
+                                              mc, frame_buf,
+                                              SIM_FRAME_BUF_SIZE, &frame_len);
+    } else if (proto == SIM_PROTO_MIXED) {
+        /* 轮替：偶数 counter 发 GB42590，奇数发 GB46750 */
+        if (mc & 1) {
+            ok = sim_encode_gb46750_beacon_frame(&t->encode_cfg, t->upc,
+                                                  mc, frame_buf,
+                                                  SIM_FRAME_BUF_SIZE, &frame_len);
+        } else {
+            ok = sim_encode_beacon_frame(&t->encode_cfg, mc, frame_buf,
+                                          SIM_FRAME_BUF_SIZE, &frame_len);
+        }
+    } else {
+        ok = sim_encode_beacon_frame(&t->encode_cfg, mc, frame_buf,
+                                      SIM_FRAME_BUF_SIZE, &frame_len);
     }
+
+    if (!ok) return false;
     return sim_wifi_send_raw_frame(frame_buf, frame_len) == ESP_OK;
 }
 
@@ -485,7 +527,7 @@ static void sim_tx_task(void *arg) {
  * ================================================================ */
 esp_err_t sim_init(void) {
     if (s_sim_state != SIM_STATE_IDLE) return ESP_OK;
-    ESP_LOGI(TAG, "Initializing simulator v2.6.2...");
+    ESP_LOGI(TAG, "Initializing simulator v2.7.0...");
 
     s_config_mutex = xSemaphoreCreateMutex();
     if (!s_config_mutex) return ESP_ERR_NO_MEM;
@@ -633,6 +675,7 @@ void sim_get_stats(sim_stats_t *out) {
     out->state = s_sim_state;
     out->brand = s_sim_config.brand;
     out->chan_mode = s_sim_config.chan_mode;
+    out->protocol = s_sim_config.protocol;
     out->speed = s_sim_config.speed;
     out->base_lat = s_sim_config.base_lat;
     out->base_lon = s_sim_config.base_lon;
@@ -736,6 +779,14 @@ void sim_set_chan_mode(sim_chan_mode_t mode) {
     ESP_LOGI(TAG, "chan_mode -> %s", sim_chan_mode_name(mode));
 }
 
+void sim_set_protocol(sim_protocol_t proto) {
+    if (s_config_mutex) xSemaphoreTake(s_config_mutex, portMAX_DELAY);
+    s_sim_config.protocol = proto;
+    if (s_config_mutex) xSemaphoreGive(s_config_mutex);
+    nvs_save_config(&s_sim_config);
+    ESP_LOGI(TAG, "protocol -> %s", sim_protocol_name(proto));
+}
+
 /* ================================================================
  * 省/市两级辅助（v2.6.1）
  * 省份列表在首次扫描城市表时按出现顺序建立。
@@ -831,7 +882,7 @@ int sim_city_step_within_province(int city_idx, int step) {
  * 串口 CLI
  * ================================================================ */
 static void cli_print_help(void) {
-    printf("\n=== RID Simulator CLI v2.6.2 ===\n");
+    printf("\n=== RID Simulator CLI v2.7.0 ===\n");
     printf("  status              - show status\n");
     printf("  count N             - set target count (1-%d)\n", SIM_MAX_TARGETS);
     printf("  speed X.X           - set speed m/s\n");
@@ -841,6 +892,7 @@ static void cli_print_help(void) {
     printf("  channel N           - set single channel (1-13)\n");
     printf("  rotate              - enable ch1/6/11 rotation\n");
     printf("  brand NAME          - crid/dji/autel/parrot/skydio/mixed\n");
+    printf("  protocol NAME       - gb42590/gb46750/mixed (v2.7.0)\n");
     printf("  pause / resume      - pause/resume TX\n");
     printf("  start               - start TX from standby\n");
     printf("  stop                - stop simulator\n");
@@ -862,6 +914,7 @@ static void cli_print_status(void) {
     printf("  State:    %s\n", state_str);
     printf("  Targets:  %d\n", st.active_count);
     printf("  Brand:    %s\n", sim_brand_name(st.brand));
+    printf("  Protocol: %s\n", sim_protocol_name(st.protocol));
     printf("  Channel:  %d (%s)\n", st.current_channel, sim_chan_mode_name(st.chan_mode));
     printf("  Speed:    %.1f m/s\n", st.speed);
     printf("  Center:   %.6f, %.6f\n", st.base_lat, st.base_lon);
@@ -994,6 +1047,19 @@ bool sim_cli_handle_line(const char *line) {
         else if (strncasecmp(name, "skydio", 6) == 0) sim_set_brand(SIM_BRAND_SKYDIO);
         else if (strncasecmp(name, "mixed", 5) == 0) sim_set_brand(SIM_BRAND_MIXED);
         else printf("Unknown brand. Use: crid/dji/autel/parrot/skydio/mixed\n");
+        return true;
+    }
+    if (strncmp(line, "protocol ", 9) == 0) {
+        const char *name = line + 9;
+        while (*name == ' ') name++;
+        if (strncasecmp(name, "gb42590", 7) == 0 || strncasecmp(name, "old", 3) == 0)
+            sim_set_protocol(SIM_PROTO_GB42590);
+        else if (strncasecmp(name, "gb46750", 7) == 0 || strncasecmp(name, "new", 3) == 0)
+            sim_set_protocol(SIM_PROTO_GB46750);
+        else if (strncasecmp(name, "mixed", 5) == 0 || strncasecmp(name, "both", 4) == 0)
+            sim_set_protocol(SIM_PROTO_MIXED);
+        else
+            printf("Unknown protocol. Use: gb42590/gb46750/mixed\n");
         return true;
     }
     return false;

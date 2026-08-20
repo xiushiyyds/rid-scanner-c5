@@ -32,7 +32,7 @@
 #include "lcd_display.h"
 
 /* 字库字符占位（确保 gen_font.py 提取到这些字） */
-static const char *FONT_CHARS = "机型关于";
+static const char *FONT_CHARS = "机型关于国标新标双发";
 
 static const char *TAG = "SIM_UI";
 
@@ -65,6 +65,7 @@ typedef enum {
     SET_CITY,
     SET_BRAND,
     SET_CHANMODE,
+    SET_PROTOCOL,
     SET_COUNT_ITEMS
 } setting_item_t;
 
@@ -107,7 +108,7 @@ static void config_buttons(void) {
 }
 
 /* ================================================================
- * 设置项调整（v2.6.2：A减 B加，目标数用预设档位）
+ * 设置项调整（v2.7.0：A减 B加，目标数用预设档位）
  * ================================================================ */
 static void adjust_setting(setting_item_t item, bool forward) {
     sim_stats_t st;
@@ -159,6 +160,14 @@ static void adjust_setting(setting_item_t item, bool forward) {
         if (m < 0) m = SIM_CHAN_ROTATE_1_6_11;
         if (m > SIM_CHAN_ROTATE_1_6_11) m = 0;
         sim_set_chan_mode((sim_chan_mode_t)m);
+        break;
+    }
+    case SET_PROTOCOL: {
+        int p = (int)st.protocol;
+        if (forward) p++; else p--;
+        if (p < 0) p = SIM_PROTO_MIXED;
+        if (p > SIM_PROTO_MIXED) p = 0;
+        sim_set_protocol((sim_protocol_t)p);
         break;
     }
     default: break;
@@ -244,6 +253,11 @@ static void draw_status_page(void) {
     lcd_fb_text(4, y, "品牌", UI_GRAY);
     snprintf(buf, sizeof(buf), "%s", sim_brand_name(st.brand));
     lcd_fb_text_right(LCD_WIDTH - 4, y, buf, UI_CYAN);
+    y += 20;
+
+    lcd_fb_text(4, y, "协议", UI_GRAY);
+    snprintf(buf, sizeof(buf), "%s", sim_protocol_name(st.protocol));
+    lcd_fb_text_right(LCD_WIDTH - 4, y, buf, UI_CYAN);
     y += 24;
 
     draw_bar(y, UI_DIM); y += 6;
@@ -262,7 +276,7 @@ static void draw_status_page(void) {
         lcd_fb_text_center(LCD_HEIGHT - 18, "B启动  A翻页 长按B设置", UI_YELLOW);
     else
         lcd_fb_text_center(LCD_HEIGHT - 18, "A翻页 B暂停 长按B设置", UI_GRAY);
-    lcd_fb_text(4, LCD_HEIGHT - 40, "v2.6.2", UI_DIM);
+    lcd_fb_text(4, LCD_HEIGHT - 40, "v2.7.0", UI_DIM);
 }
 
 static void draw_targets_page(void) {
@@ -318,6 +332,7 @@ static const char *setting_name(setting_item_t item) {
         case SET_CITY:     return "城市";
         case SET_BRAND:    return "品牌";
         case SET_CHANMODE: return "信道模式";
+        case SET_PROTOCOL: return "协议";
         default:           return "?";
     }
 }
@@ -350,6 +365,9 @@ static void setting_value_str(setting_item_t item, char *out, size_t len) {
             break;
         case SET_CHANMODE:
             snprintf(out, len, "%s", sim_chan_mode_name(st.chan_mode));
+            break;
+        case SET_PROTOCOL:
+            snprintf(out, len, "%s", sim_protocol_name(st.protocol));
             break;
         default:
             out[0] = '?'; out[1] = 0; break;
@@ -392,8 +410,8 @@ static void draw_settings_page(void) {
 static void draw_about_page(void) {
     lcd_fb_fill(UI_BG);
     lcd_fb_text_center(60, "RID 模拟发射", UI_CYAN);
-    lcd_fb_text_center(86, "v2.6.2", UI_WHITE);
-    lcd_fb_text_center(120, "GB42590 + DJI", UI_GRAY);
+    lcd_fb_text_center(86, "v2.7.0", UI_WHITE);
+    lcd_fb_text_center(120, "GB42590/46750", UI_GRAY);
     lcd_fb_text_center(140, "多品牌 多信道", UI_GRAY);
     lcd_fb_text_center(160, "300目标 省市选择", UI_GRAY);
     lcd_fb_text_center(180, "信道分组轮发", UI_GRAY);
@@ -423,7 +441,7 @@ static void ui_refresh_task(void *arg) {
 }
 
 /* ================================================================
- * 按键任务（v2.6.2：设置页 A减/B加，长按 A 切设置项）
+ * 按键任务（v2.7.0：设置页 A减/B加，长按 A 切设置项）
  *
  * 运行页：
  *   A 短按：循环翻页
