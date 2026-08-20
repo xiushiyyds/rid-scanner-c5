@@ -84,16 +84,17 @@ jobs:
       - name: Build simulator
         run: |
           source $HOME/esp/esp-idf/export.sh
-          idf.py set-target esp32c5
-          # Enable simulator build via sdkconfig append
-          echo "CONFIG_RID_SCANNER_BUILD_SIMULATOR=y" >> sdkconfig.defaults
-          rm -rf sdkconfig build
-          idf.py reconfigure
-          idf.py build
+          # Use a clean build directory with simulator Kconfig enabled
+          idf.py -B build_sim set-target esp32c5
+          # Append simulator flag to sdkconfig (not defaults, to avoid
+          # conflict with any cached sdkconfig)
+          echo "CONFIG_RID_SCANNER_BUILD_SIMULATOR=y" >> build_sim/sdkconfig
+          idf.py -B build_sim reconfigure
+          idf.py -B build_sim build
           mkdir -p artifacts/simulator
-          cp build/*.bin build/*.elf artifacts/simulator/ 2>/dev/null || true
-          cp build/bootloader/*.bin artifacts/simulator/ 2>/dev/null || true
-          cp build/partition_table/*.bin artifacts/simulator/ 2>/dev/null || true
+          cp build_sim/*.bin build_sim/*.elf artifacts/simulator/ 2>/dev/null || true
+          cp build_sim/bootloader/*.bin artifacts/simulator/ 2>/dev/null || true
+          cp build_sim/partition_table/*.bin artifacts/simulator/ 2>/dev/null || true
 
       - name: Upload simulator artifacts
         uses: actions/upload-artifact@v4
