@@ -214,20 +214,25 @@ static TaskHandle_t s_hold_task_handle = NULL;
 /* 判断是否有活跃目标，并找出最近的信道（用于锁定） */
 static uint8_t get_best_lock_channel(void) {
     extern uav_track_t *crid_tracker_get_table(void);
+    extern SemaphoreHandle_t crid_tracker_get_mutex(void);
     uav_track_t *table = crid_tracker_get_table();
     if (!table) return 0;
 
     uint8_t best_ch = 0;
     uint32_t best_last_seen = 0;
+    /* v2.6.5: 统一使用 esp_log_timestamp()，与 last_seen_ms 写入时的时间基准一致。
+     * 之前用 xTaskGetTickCount() 导致时间域不匹配，锁定判断失效。 */
+    uint32_t now = esp_log_timestamp();
+
+    /* 加锁遍历，避免与 parser_task 并发读写 tracker 表 */
+    SemaphoreHandle_t mutex = crid_tracker_get_mutex();
+    if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) return 0;
+
     for (int i = 0; i < MAX_TRACKED_UAVS; i++) {
-        /* v2.6.2: 必须检查 active 标志。MAC 合并去重后 slot 的 active=false
-         * 但 mac[] 不会被清零，旧代码只检查 mac[0]||mac[1] 会选到已失效条目。 */
         if (!table[i].active) continue;
-        uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        /* v2.6.3: 锁定超时从30s缩短到10s。目标消失后更快恢复全信道扫描。 */
+        /* 锁定超时 10s */
         if (now - table[i].last_seen_ms >= 10000) continue;
-        /* 只锁定 WiFi 目标（channel != 0）。BLE 源 channel=0 不应该
-         * 触发 WiFi 信道锁定，否则会把 BLE 目标错误地锁到 ch6。 */
+        /* 只锁定 WiFi 目标（channel != 0） */
         uint8_t ch = table[i].last_channel & 0x7F;
         if (ch == 0) continue;
         if (table[i].last_seen_ms > best_last_seen) {
@@ -235,6 +240,8 @@ static uint8_t get_best_lock_channel(void) {
             best_ch = ch;
         }
     }
+
+    xSemaphoreGive(mutex);
     return best_ch;
 }
 
@@ -242,7 +249,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.4: ch6 1.5s / ch1,ch11 250ms (adaptive lock, BLE stop on lock)");
+             "Channel rotation v2.6.5: ch6 1.5s / ch1,ch11 250ms (adaptive lock, timestamp fix)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
