@@ -24,6 +24,7 @@
 #include "crid_json.h"
 #include "crid_display.h"
 #include "geofence.h"
+#include "gps_module.h"
 
 /* ================================================================
  * 双输出流状态
@@ -284,6 +285,9 @@ void json_status_report(uint32_t loop_minutes, uint32_t free_heap,
                         uint32_t rid_detections, float rid_per_sec,
                         uint32_t non_rid_vendor, float non_rid_per_sec,
                         uint32_t queue_overflows, int active_uavs) {
+    /* v2.6.8: GPS 字段直接嵌入 status JSON，走已验证的 DATA_PRINTF 通道 */
+    gps_data_t gd = gps_get_data();
+    int gps_valid = (gd.valid && gd.fix_quality > 0) ? 1 : 0;
     DATA_PRINTF("{\"evt\":\"%s\",\"ts\":%lu,\"loop_min\":%lu,"
            "\"free_heap\":%lu,"
            "\"total_pkts\":%lu,\"pkts_per_sec\":%.1f,"
@@ -291,7 +295,9 @@ void json_status_report(uint32_t loop_minutes, uint32_t free_heap,
            "\"beacons\":%lu,\"beacons_per_sec\":%.1f,"
            "\"rid_detections\":%lu,\"rid_per_sec\":%.1f,"
            "\"non_rid_vendor\":%lu,\"non_rid_per_sec\":%.1f,"
-           "\"queue_overflows\":%lu,\"active_uavs\":%d}\n",
+           "\"queue_overflows\":%lu,\"active_uavs\":%d,"
+           "\"gps_lat\":%.6f,\"gps_lon\":%.6f,\"gps_alt\":%.1f,"
+           "\"gps_sats\":%d,\"gps_hdop\":%.1f,\"gps_valid\":%d}\n",
            evt_name(JSON_EVT_STATUS),
            (unsigned long)esp_log_timestamp(),
            (unsigned long)loop_minutes,
@@ -301,7 +307,11 @@ void json_status_report(uint32_t loop_minutes, uint32_t free_heap,
            (unsigned long)beacons, beacons_per_sec,
            (unsigned long)rid_detections, rid_per_sec,
            (unsigned long)non_rid_vendor, non_rid_per_sec,
-            (unsigned long)queue_overflows, active_uavs);
+            (unsigned long)queue_overflows, active_uavs,
+            gps_valid ? gd.latitude : 0.0,
+            gps_valid ? gd.longitude : 0.0,
+            gps_valid ? gd.altitude : 0.0,
+            gd.satellites, gd.hdop, gps_valid);
     DATA_PRINTF("[ZH]状态|%lumin|%d架|%.1fpkt/s|heap:%lu[/ZH]\n",
             (unsigned long)loop_minutes, active_uavs, pkts_per_sec,
             (unsigned long)free_heap);
