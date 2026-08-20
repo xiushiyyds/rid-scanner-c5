@@ -524,15 +524,10 @@ static void gps_report_task(void *arg) {
             snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,%d,%.1f\n",
                      gd.satellites, gd.hdop);
         }
-        /* v2.6.8: 同时写 stdout(DATA:前缀,USB网页读) + 回调(BLE/UART)。
-         * 之前只调 crid_ble_write_cb 导致 USB 网页端收不到 SELF_GPS。
-         * 镜像 crid_json.c 中 data_write() 的双通道写法。 */
-        fwrite("DATA:", 1, 5, stdout);
-        fwrite(buf, 1, strlen(buf), stdout);
-        fflush(stdout);
-        json_write_cb_t wcb = json_get_data_write_cb();
-        if (wcb) wcb(buf, strlen(buf), json_get_data_write_ctx());
-        else    crid_ble_write_cb(buf, strlen(buf), NULL);
+        /* v2.6.8: 通过 json_raw_line 走 data_write() 通道（stdout DATA:前缀 + BLE），
+         * 跟 uav_update 等 JSON 数据走完全相同的路径，确保 USB 网页端能收到。
+         * 之前只调 crid_ble_write_cb 导致 USB 网页端收不到 SELF_GPS。 */
+        json_raw_line(buf);
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }

@@ -182,6 +182,13 @@ void json_debug(const char *module, const char *message);
  */
 void json_decode_fail(uint8_t byte0, uint8_t byte1, uint8_t len);
 
+/**
+ * 输出一行原始文本到 DATA: 通道（stdout + 回调）。
+ * 用于非 JSON 数据行，例如 SELF_GPS 行。
+ * 调用方需确保 line 以 \n 结尾。
+ */
+void json_raw_line(const char *line);
+
 #ifdef __cplusplus
 }
 #endif

@@ -818,3 +818,11 @@ void json_decode_fail(uint8_t byte0, uint8_t byte1, uint8_t len) {
            (unsigned long)esp_log_timestamp(),
            byte0, byte1, len);
 }
+
+/* 原始行数据输出（供外部模块走 DATA: 通道，例如 GPS SELF_GPS 行） */
+void json_raw_line(const char *line) {
+    if (!line) return;
+    size_t len = strlen(line);
+    if (len == 0) return;
+    DATA_PRINTF("%s", line);
+}
