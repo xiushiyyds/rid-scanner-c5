@@ -15,7 +15,7 @@ cmake_minimum_required(VERSION 3.16)
 # ================================================================
 
 # v2.1.0: PTA 硬件共存 + GB46750 BLE 路径修复 + 删除 TDD
-set(CRID_VERSION "2.6.5")
+set(CRID_VERSION "2.6.6-dbg")
 
 message(STATUS ">>> Building NekolunaRID Scanner v${CRID_VERSION}")
 

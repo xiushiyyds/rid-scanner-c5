@@ -247,12 +247,20 @@ static uint8_t get_best_lock_channel(void) {
 
 static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
-    char msg[96];
+    char msg[128];
+
+    /* v2.6.6-dbg: 启动后立即通过 UART 打印，确认任务已被调度 */
+    ESP_LOGI(TAG, "ch_hold task ENTERED (v2.6.6-dbg), tick=%lu",
+             (unsigned long)xTaskGetTickCount());
+
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.5: ch6 1.5s / ch1,ch11 250ms (adaptive lock, timestamp fix)");
+             "Channel rotation v2.6.6-dbg: ch6 1.5s / ch1,ch11 250ms (verbose UART diagnostics)");
     json_debug("RID_SNIFF", msg);
+    ESP_LOGI(TAG, "%s", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+    ESP_LOGI(TAG, "ch_hold: after 2s delay, starting rotation loop");
 
     uint8_t idx = 0;
     for (uint8_t i = 0; i < SCAN_CHANNEL_COUNT; i++) {
@@ -261,29 +269,35 @@ static void channel_hold_task(void *pvParameter) {
 
     /* 诊断统计 */
     uint32_t diag_counter = 0;
+    uint32_t loop_count = 0;
     uint32_t last_total = 0, last_rid = 0, last_beacon = 0;
+    UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "ch_hold: stack HWM at startup = %u words", (unsigned)stack_hwm);
 
     while (!s_hold_should_stop) {
+        loop_count++;
+
         /* 自适应：检查是否需要锁定/解锁 */
         uint8_t lock_ch = get_best_lock_channel();
+        if (loop_count <= 6 || lock_ch != s_locked_channel) {
+            ESP_LOGI(TAG, "ch_hold loop=%lu lock_ch=%u cur_locked=%u",
+                     (unsigned long)loop_count, lock_ch, s_locked_channel);
+        }
         if (lock_ch != s_locked_channel) {
             if (lock_ch != 0) {
                 s_locked_channel = lock_ch;
+                ESP_LOGI(TAG, ">>> ADAPTIVE LOCK ch%u", lock_ch);
                 snprintf(msg, sizeof(msg), "Adaptive lock: ch%u (target found)", lock_ch);
                 json_debug("RID_SNIFF", msg);
-                /* v2.6.2: 锁定 WiFi 目标时完全停止 BLE 扫描，
-                 * 让 WiFi sniffer 独占 100% 空中时间，最大化包接收率。
-                 * 手机已连接时 BLE 扫描本就已停，不做操作。
-                 * 解锁后恢复 BLE 80% 占空比扫描。 */
                 if (!crid_ble_is_connected()) {
                     crid_ble_scan_stop();
-                    ESP_LOGI(TAG, "BLE scan stopped for WiFi lock (100% airtime)");
+                    ESP_LOGI(TAG, "BLE scan stopped for WiFi lock");
                 }
             } else if (s_locked_channel != 0) {
+                ESP_LOGI(TAG, ">>> ADAPTIVE UNLOCK ch%u", s_locked_channel);
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
-                /* 解锁后恢复 BLE 80% 占空比 */
                 if (!crid_ble_is_connected()) {
                     crid_ble_scan_set_duty_high();
                     crid_ble_scan_stop();
@@ -297,25 +311,35 @@ static void channel_hold_task(void *pvParameter) {
         uint16_t dwell;
 
         if (s_locked_channel != 0) {
-            /* 锁定状态：持续在目标信道上 */
             ch = s_locked_channel;
-            dwell = 200;  /* 每 200ms 检查一次是否还需要锁定 */
+            dwell = 200;
         } else {
-            /* 轮巡状态 */
             ch = SCAN_CHANNELS[idx];
             dwell = CHANNEL_DWELL_MS_ARR[idx];
             idx = (idx + 1) % SCAN_CHANNEL_COUNT;
         }
 
-        /* v2.6.2: 只有信道真正变化时才调用 set_channel。
-         * 锁定状态下每 200ms 循环一次，如果信道没变就不调，
-         * 避免重复 set_channel 导致射频重新校准、周期性丢包。 */
         if (ch != s_current_channel) {
+            ESP_LOGI(TAG, ">>> SWITCH ch%u -> ch%u (dwell=%ums)",
+                     s_current_channel, ch, dwell);
             s_current_channel = ch;
             esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-            if (ret != ESP_OK && !s_hold_should_stop) {
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "!!! esp_wifi_set_channel(%u) FAILED: %s",
+                         ch, esp_err_to_name(ret));
                 snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
                 json_warning("RID_SNIFF", msg);
+            } else {
+                /* 验证信道是否真的切过去了 */
+                uint8_t primary = 0;
+                wifi_second_chan_t second = 0;
+                esp_wifi_get_channel(&primary, &second);
+                ESP_LOGI(TAG, "    set_channel OK, readback primary=%u", primary);
+            }
+        } else {
+            if (loop_count <= 6) {
+                ESP_LOGI(TAG, "    stay on ch%u (dwell=%ums), idx=%u",
+                         ch, dwell, idx);
             }
         }
 
@@ -338,14 +362,16 @@ static void channel_hold_task(void *pvParameter) {
             last_total = cur_total;
             last_rid = cur_rid;
             last_beacon = cur_beacon;
-            snprintf(msg, sizeof(msg),
-                     "Diag: total=%lu(+%lu) mgmt=+%lu RID=%lu(+%lu) ch=%u%s",
+            UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI(TAG,
+                     "ch_hold diag loop=%lu: total=%lu(+%lu) mgmt=+%lu RID=%lu(+%lu) ch=%u%s hwm=%u",
+                     (unsigned long)loop_count,
                      (unsigned long)cur_total, (unsigned long)d_total,
                      (unsigned long)d_beacon,
                      (unsigned long)cur_rid, (unsigned long)d_rid,
                      s_current_channel,
-                     s_locked_channel ? " LOCKED" : "");
-            json_debug("RID_SNIFF", msg);
+                     s_locked_channel ? " LOCKED" : "",
+                     (unsigned)hwm);
         }
     }
 
@@ -461,20 +487,23 @@ void crid_sniffer_start_channel_hold(void) {
     }
     s_hold_should_stop = false;
 
-    char msg[96];
+    char msg[128];
     snprintf(msg, sizeof(msg),
              "ch_hold create: free_heap=%u internal_free=%u internal_largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     json_debug("RID_SNIFF", msg);
+    ESP_LOGI(TAG, "%s", msg);
+    ESP_LOGI(TAG, "ch_hold: creating task stack=%u prio=%u ...",
+             CH_HOLD_TASK_STACK, CH_HOLD_TASK_PRIO);
 
-    /* 优先内部 SRAM 栈；失败则尝试 PSRAM 栈（CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y）。
-     * ch_hold 任务不做 DMA、不做 SPI 传输，PSRAM 栈完全安全，延迟可忽略。 */
+    /* 优先内部 SRAM 栈；失败则尝试 PSRAM 栈。 */
     BaseType_t ok = xTaskCreate(channel_hold_task, "ch_hold",
                 CH_HOLD_TASK_STACK, NULL, CH_HOLD_TASK_PRIO, &s_hold_task_handle);
     if (ok == pdPASS) {
         json_debug("RID_SNIFF", "ch_hold task created on internal SRAM (OK)");
+        ESP_LOGI(TAG, "ch_hold task CREATED on internal SRAM, handle=%p", s_hold_task_handle);
     }
     if (ok != pdPASS) {
         snprintf(msg, sizeof(msg),
@@ -491,9 +520,11 @@ void crid_sniffer_start_channel_hold(void) {
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             json_error("RID_SNIFF", msg);
+            ESP_LOGE(TAG, "%s", msg);
             s_hold_task_handle = NULL;
         } else {
             json_debug("RID_SNIFF", "ch_hold task created on PSRAM stack (OK)");
+            ESP_LOGI(TAG, "ch_hold task CREATED on PSRAM stack, handle=%p", s_hold_task_handle);
         }
     }
 }
