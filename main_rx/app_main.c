@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.7"
+#define CRID_VERSION_STRING "2.6.8"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -524,7 +524,11 @@ static void gps_report_task(void *arg) {
             snprintf(buf, sizeof(buf), "SELF_GPS:0,0,0,%d,%.1f\n",
                      gd.satellites, gd.hdop);
         }
-        crid_ble_write_cb(buf, strlen(buf), NULL);
+        /* v2.6.8: 走 data_write_fanout → stdout(DATA:前缀)+UART+BLE，
+         * 之前只调 crid_ble_write_cb 导致 USB 网页端收不到 SELF_GPS。 */
+        json_write_cb_t wcb = json_get_data_write_cb();
+        if (wcb) wcb(buf, strlen(buf), json_get_data_write_ctx());
+        else    crid_ble_write_cb(buf, strlen(buf), NULL);
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
