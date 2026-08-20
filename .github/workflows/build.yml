@@ -12,7 +12,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-detector:
+    name: Build Detector
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,19 +38,66 @@ jobs:
           git submodule update --init --checkout --depth 1
           ./install.sh esp32c5
 
-      - name: Build project
+      - name: Build detector (default)
         run: |
           source $HOME/esp/esp-idf/export.sh
           idf.py set-target esp32c5
           idf.py build
+          mkdir -p artifacts/detector
+          cp build/*.bin build/*.elf artifacts/detector/ 2>/dev/null || true
+          cp build/bootloader/*.bin artifacts/detector/ 2>/dev/null || true
+          cp build/partition_table/*.bin artifacts/detector/ 2>/dev/null || true
 
-      - name: Upload firmware artifacts
+      - name: Upload detector artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-esp32c5
-          path: |
-            build/*.bin
-            build/*.elf
-            build/bootloader/*.bin
-            build/partition_table/*.bin
+          name: firmware-detector
+          path: artifacts/detector/
+          retention-days: 30
+
+  build-simulator:
+    name: Build Simulator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ESP-IDF prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget flex bison gperf python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+      - name: Clone ESP-IDF (v5.5.2)
+        run: |
+          mkdir -p $HOME/esp
+          cd $HOME/esp
+          git clone --depth 1 --branch v5.5.2 https://github.com/espressif/esp-idf.git
+          cd esp-idf
+          git submodule update --init --checkout --depth 1
+          ./install.sh esp32c5
+
+      - name: Build simulator
+        run: |
+          source $HOME/esp/esp-idf/export.sh
+          idf.py set-target esp32c5
+          # Enable simulator build via sdkconfig append
+          echo "CONFIG_RID_SCANNER_BUILD_SIMULATOR=y" >> sdkconfig.defaults
+          rm -rf sdkconfig build
+          idf.py reconfigure
+          idf.py build
+          mkdir -p artifacts/simulator
+          cp build/*.bin build/*.elf artifacts/simulator/ 2>/dev/null || true
+          cp build/bootloader/*.bin artifacts/simulator/ 2>/dev/null || true
+          cp build/partition_table/*.bin artifacts/simulator/ 2>/dev/null || true
+
+      - name: Upload simulator artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-simulator
+          path: artifacts/simulator/
           retention-days: 30
