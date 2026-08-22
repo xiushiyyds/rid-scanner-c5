@@ -55,14 +55,8 @@
 #include "dji_droneid.h"
 #include "evlog.h"
 
-#if CONFIG_RID_SCANNER_BUILD_SIMULATOR
-#include "sim_core.h"
-#include "sim_cities.h"
-#include "sim_lcd_ui.h"
-#endif
-
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.7.1"
+#define CRID_VERSION_STRING "2.7.2"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -563,75 +557,12 @@ static bool lcd_gps_provider(double *lat, double *lon, double *alt, int *sats_ou
  *  14. startup banner
  * ================================================================ */
 void app_main(void) {
-
-#if CONFIG_RID_SCANNER_BUILD_SIMULATOR
-    /* ================================================================
-     * 模拟器构建：直接进入模拟发射模式（不显示菜单）。
-     * 注意：此构建链接了 crid_simulator 组件，不能用于侦测——
-     * 链接模拟器会改变内存布局导致 WiFi/BLE 共存异常。
-     * 侦测请刷 firmware-detector 构建。
-     * ================================================================ */
-    if (lcd_display_early_init() != 0) {
-        ESP_LOGE("RID_MAIN", "LCD early init failed");
-    }
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        ret = nvs_flash_init();
-    }
-    esp_netif_init();
-    esp_event_loop_create_default();
-
-    ESP_LOGI("RID_MAIN", "Boot mode: SIMULATOR");
-
-    lcd_display_init_for_sim();
-    sim_init();
-
-    sim_config_t sim_cfg;
-    sim_get_default_config(&sim_cfg);
-    sim_cfg.target_count = 300;
-    sim_cfg.channel = 6;
-    sim_cfg.tx_power = 20;
-    sim_cfg.brand = SIM_BRAND_MIXED;
-    sim_cfg.chan_mode = SIM_CHAN_ROTATE_1_6_11;
-    sim_cfg.speed = 5.0f;
-    sim_cfg.flight_mode = SIM_MODE_CIRCLE;
-    sim_cfg.frame_interval_ms = 3;
-    sim_cfg.round_interval_ms = 1000;
-    sim_cfg.base_lat = g_sim_cities[sim_cfg.city_index].lat;
-    sim_cfg.base_lon = g_sim_cities[sim_cfg.city_index].lon;
-    sim_update_config(&sim_cfg);
-
-    ESP_LOGI("RID_MAIN", "Simulator armed (not transmitting). Press B on LCD to start.");
-    sim_lcd_ui_start();
-    printf("\nRID Simulator ready. Type 'help' for commands.\n\n");
-
-    char cli_ch;
-    while (1) {
-        int n = fread(&cli_ch, 1, 1, stdin);
-        if (n > 0) {
-            putchar(cli_ch);
-            sim_cli_feed(&cli_ch, 1);
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-    }
-    /* 不会到达这里 */
-#else
-    /* ================================================================
-     * 纯侦测构建（默认）：直接启动，不开机菜单，不链接模拟器。
-     * 这是日常使用的固件，WiFi/BLE 共存最稳定。
-     * ================================================================ */
     ESP_LOGI("RID_MAIN", "Starting detector (pure build, no simulator)...");
-#endif
 
     /* ================================================================
-     * 侦测模式启动流程（与 v2.3.2 完全一致）
+     * 侦测模式启动流程
      * BLE 先初始化抢占连续内部 SRAM，LCD 在 BLE 之后初始化，WiFi 最后启动。
      * ================================================================ */
-    // 4. NVS + netif + event loop
-    // (模拟器构建中 NVS 已在上方初始化，这里跳过)
-#if !CONFIG_RID_SCANNER_BUILD_SIMULATOR
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -643,7 +574,6 @@ void app_main(void) {
     }
     esp_netif_init();
     esp_event_loop_create_default();
-#endif
 
     // 1. UART 数据端口 + JSON 回调（在 NVS 之后）
     uart_data_port_init();
@@ -756,7 +686,7 @@ void app_main(void) {
      * 加上本任务的 96 字节 buf 和调用帧，3072 偏紧。 */
     xTaskCreatePinnedToCore(gps_report_task, "gps_rpt", 4096, NULL, 3, NULL, 0);
 
-    // 13. 启动信道轮转（BLE 持续扫描，WiFi 共存硬件自动分时）
+    // 13. 启动信道轮转（BLE 10% duty 保活 PTA，WiFi sniffer 拿 90% 空中时间）
     crid_sniffer_start_channel_hold();
 
     // 14. 启动完成
@@ -764,6 +694,6 @@ void app_main(void) {
                         FIXED_CHANNEL, MAX_TRACKED_UAVS,
                         (uint32_t)esp_get_free_heap_size());
 
-    ESP_LOGI("RID_MAIN", "Detector v%s started — BLE continuous scan + WiFi sniffer",
+    ESP_LOGI("RID_MAIN", "Detector v%s started — WiFi sniffer + BLE WIFI_LOCKED 10%%",
              CRID_VERSION_STRING);
 }

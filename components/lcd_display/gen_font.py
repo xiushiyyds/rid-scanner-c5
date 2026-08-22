@@ -39,8 +39,6 @@ def extract_ui_chars():
         os.path.join(base, "lcd_display.c"),
         os.path.join(base, "include", "lcd_display.h"),
         os.path.join(base, "..", "..", "main_rx", "app_main.c"),
-        os.path.join(base, "..", "crid_simulator", "sim_core.c"),
-        os.path.join(base, "..", "crid_simulator", "sim_lcd_ui.c"),
     ]
     chars = set()
     for src_path in scan_files:

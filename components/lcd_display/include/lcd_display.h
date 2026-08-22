@@ -75,40 +75,10 @@ typedef enum {
 } lcd_key_event_t;
 
 /* ================================================================
- * 开机模式选择 (v2.5.0)
- * ================================================================ */
-typedef enum {
-    BOOT_MODE_DETECTOR = 0,
-    BOOT_MODE_SIMULATOR,
-    BOOT_MODE_COUNT
-} boot_mode_t;
-
-/* ================================================================
  * API 函数
  * ================================================================ */
 
-/**
- * 开机模式选择菜单（阻塞式，最多等 timeout_ms 毫秒）。
- * 必须在 LCD 硬件初始化完成后、WiFi/BLE 初始化之前调用。
- * @param timeout_ms 超时毫秒数（6000=6秒），超时返回默认侦测模式
- * @return 用户选择的模式
- */
-boot_mode_t lcd_boot_menu(uint32_t timeout_ms);
-
-/* ================================================================
- * 早期 LCD 硬件初始化（用于开机菜单，仅初始化 framebuffer+SPI+背光）
- * 不创建刷新任务、不读按键、不显示侦测 UI。
- * 之后必须再调用 lcd_display_init() 完成完整初始化。
- * ================================================================ */
-int lcd_display_early_init(void);
-
-/* ================================================================
- * 侦测/模拟模式运行时页面
- * ================================================================ */
 int lcd_display_init(void);
-
-/* 模拟器模式专用：只初始化 PMIC，不启动侦测页刷新/按键任务 */
-int lcd_display_init_for_sim(void);
 
 void lcd_display_set_source(uav_track_t *tracker_table,
                             void *tracker_mutex,
@@ -138,16 +108,3 @@ void lcd_display_register_channel_provider(lcd_channel_provider_cb_t cb);
 #endif
 
 #endif // LCD_DISPLAY_H
-
-/* ================================================================
- * 模拟器 UI 底层访问接口（v2.6.0，供 sim_lcd_ui.c 使用）
- * ================================================================ */
-#include <stdint.h>
-uint16_t *lcd_get_framebuffer(void);
-void lcd_flush(void);
-void lcd_fb_fill(uint16_t c);
-void lcd_fb_fillrect(int x, int y, int w, int h, uint16_t c);
-void lcd_fb_text(int x, int y, const char *s, uint16_t c);
-void lcd_fb_text_center(int y, const char *s, uint16_t c);
-void lcd_fb_text_right(int xr, int y, const char *s, uint16_t c);
-uint16_t lcd_rgb565(uint8_t r, uint8_t g, uint8_t b);

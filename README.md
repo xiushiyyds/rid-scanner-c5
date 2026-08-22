@@ -1,34 +1,37 @@
 # ESP32-C5 RID Scanner
 
-基于 ESP32-C5 (LILYGO T-Display-C5) 的手持无人机 Remote ID 侦测工具。
+基于 ESP32-C5 (LILYGO T-Display-C5) 的手持无人机 Remote ID 纯侦测固件。
 
 ## 功能特性
 
-- **4协议RID识别** - 支持 ASTM F3411、GB/T 42590、GB/T 46750、OpenDroneID 协议解析
-- **地理围栏告警** - 自定义禁飞区域，实时距离检测与分级告警
-- **RID伪造模拟器** - 多目标并行模拟，支持多种飞行模式（圆形/悬停/直线/8字）
-- **Web BLE控制** - 通过手机浏览器无线连接设备，实时控制模拟器
-- **LCD实时显示** - 板载屏幕展示侦测结果与目标信息
-- **USB网络桥接** - 支持通过USB将数据转发到PC端监控系统
+- **4协议RID识别**：支持 ASTM F3411、GB/T 42590、GB/T 46750、OpenDroneID 协议解析
+- **DJI DroneID识别**：支持 DJI Beacon Vendor IE 解析、SN/机型/位置/高度/速度提取
+- **WiFi Sniffer优先**：ch6 1500ms 主听，ch1/ch11 各 200ms 快速扫漏；发现目标后锁定 ch6
+- **BLE 低占空比保活**：未连接手机 10% duty，手机连接后 40% duty，避免破坏 PTA 共存
+- **ISR层去重**：同一 MAC 50ms 内重复帧直接丢弃，降低 burst 模式队列压力
+- **LCD实时显示**：板载 170×320 屏幕展示侦测列表、目标详情、信号强度与高度
+- **手机数据推送**：BLE NUS 通道输出 JSON，配合 `rid-monitor` 网页查看雷达/轨迹/KML
+- **地理围栏告警**：自定义禁飞区域，实时距离检测与分级告警
+- **证据日志**：新目标和周期性数据写入 Flash，便于事后追溯
 
 ## 硬件要求
 
 | 组件 | 型号 | 说明 |
 |------|------|------|
-| 主控 | LILYGO T-Display-C5 | ESP32-C5 + 1.9" LCD |
-| GPS | ATGM336H / 兼容NMEA模块 | UART连接，9600bps |
+| 主控 | LILYGO T-Display-C5 | ESP32-C5 + 1.9" ST7789 LCD |
+| GPS | ATGM336H / 兼容NMEA模块 | UART连接，9600bps（可选） |
 | 天线 | 2.4GHz WiFi天线 | SMA接口 |
 
 ## 项目结构
 
-```
-├── main_rx/              # 主程序（RID接收/解析/追踪）
+```text
+├── main_rx/              # RID接收、解析、追踪、BLE、LCD业务逻辑
 ├── components/
-│   ├── crid_simulator/   # RID模拟器组件
-│   ├── lcd_display/      # LCD显示驱动
-│   └── opendroneid/      # OpenDroneID协议库
+│   ├── lcd_display/      # ST7789 LCD显示驱动与UI
+│   ├── opendroneid/      # OpenDroneID协议库
+│   └── crid_common/      # 品牌/型号查表等公共组件
 ├── partition_table/      # 分区表
-└── docs/                 # GitHub Pages（Web BLE控制）
+└── .github/workflows/    # GitHub Actions 云端编译
 ```
 
 ## 编译方式
@@ -36,36 +39,23 @@
 ### 本地编译
 
 ```bash
-# 安装 ESP-IDF v5.2.1
 . $IDF_PATH/export.sh
-
-# 编译
 idf.py set-target esp32c5
 idf.py build
-
-# 烧录
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-### 云端编译 (GitHub Actions)
+要求 ESP-IDF v5.5.2 或兼容版本。
 
-推送代码到 `main` 分支即可自动触发编译，固件产物可在 Actions 页面下载。
+### 云端编译
 
-## Web BLE 控制
+推送到 `main` 分支后，GitHub Actions 自动编译纯侦测固件，产物为 `firmware-detector`。
 
-通过 GitHub Pages 部署的 Web 页面可以无线控制 ESP32-C5 的模拟器功能：
+## 刷写
 
-🔗 **[打开 Web BLE 控制面板](https://xiushiyyds.github.io/rid-scanner-c5/monitor.html)**
-
-支持功能：
-- BLE扫描与连接
-- 目标数量调节（1-64）
-- 发射功率调节（0.5-20 dBm）
-- 飞行模式切换（圆形/悬停/直线/8字）
-- Wi-Fi信道选择（CH 1/6/11）
-- 实时状态查看
-
-> ⚠️ Web BLE 需要 HTTPS 环境 + Chrome/Edge 浏览器
+```bash
+esptool --chip esp32-c5 --port /dev/ttyACM0 --baud 921600 write-flash 0x10000 remoteid_scanner.bin
+```
 
 ## License
 

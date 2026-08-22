@@ -1,13 +1,14 @@
 /**
- * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.1)
+ * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.2)
  *
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
- * v2.7.1: 接收能力深度优化（对标肩灯策略）：
- *         1) 开机不启动 BLE RID 扫描，WiFi sniffer 独占 100% 空中时间
- *         2) 手机连接后才以 LOW 40% duty 启动 BLE 扫描
- *         3) sniffer 队列 64→128，parser 优先级 4→5，防 burst 丢包
- *         4) ch6 1500ms 主听，ch1/ch11 各 200ms 快速扫漏
- *         5) 自适应锁定只锁 ch6，锁定时停止 BLE 扫描
+ * v2.7.2: 修复 v2.7.1 队列翻倍导致 SRAM 耗尽、WiFi DMA 缓冲分配失败、
+ *         信道轮询失效的回归 bug。
+ *         1) sniffer 队列回退 64（128 多吃 20KB SRAM，C5 无法承受）
+ *         2) ISR 层 MAC 去重：同一 MAC 50ms 内重复帧不入队，
+ *            用 ~160B SRAM 代价过滤 S3 burst 2/3 重复帧
+ *         3) parser 优先级保持 5
+ * v2.7.1: 开机不启动 BLE 扫描（WiFi 独占空中时间）、ch6 1.5s/ch1,ch11 0.2s
  * v2.7.0: BLE 占空比 80%→40%，ch6-only 锁定，evlog 降频
  * v2.6.x 历史：自适应信道锁定、ISR 临界区修复、Beacon 采样移除等。
  */
@@ -44,6 +45,40 @@ static const char *TAG = "WIFI_SNIFFER";
 #define FIXED_CHANNEL 6
 #endif
 
+/* ---- v2.7.2: ISR 层 MAC 去重 ----
+ * S3 burst 模式同一 MAC 每 20ms 连发 3 帧，内容完全相同。
+ * 在 ISR 中用 16 项环形缓存过滤 50ms 内的重复帧，
+ * 减少 2/3 入队量，用极小 SRAM 开销（~160B）代替队列翻倍。
+ * 真实无人机 RID 1Hz 广播不会被误过滤（间隔远 > 50ms）。 */
+#define ISR_DEDUP_SLOTS     16
+#define ISR_DEDUP_WINDOW_MS 50
+typedef struct {
+    uint8_t  mac[6];
+    uint32_t ts_ms;
+} isr_dedup_t;
+static isr_dedup_t s_isr_dedup[ISR_DEDUP_SLOTS];
+static uint8_t s_isr_dedup_idx = 0;
+static portMUX_TYPE s_isr_dedup_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline bool isr_dedup_check(const uint8_t *mac, uint32_t now_ms) {
+    bool dup = false;
+    portENTER_CRITICAL_ISR(&s_isr_dedup_mux);
+    for (int i = 0; i < ISR_DEDUP_SLOTS; i++) {
+        if (memcmp(s_isr_dedup[i].mac, mac, 6) == 0 &&
+            (now_ms - s_isr_dedup[i].ts_ms) < ISR_DEDUP_WINDOW_MS) {
+            dup = true;
+            break;
+        }
+    }
+    if (!dup) {
+        memcpy(s_isr_dedup[s_isr_dedup_idx].mac, mac, 6);
+        s_isr_dedup[s_isr_dedup_idx].ts_ms = now_ms;
+        s_isr_dedup_idx = (s_isr_dedup_idx + 1) % ISR_DEDUP_SLOTS;
+    }
+    portEXIT_CRITICAL_ISR(&s_isr_dedup_mux);
+    return dup;
+}
+
 /* ================================================================
  ISR 回调
  ================================================================ */
@@ -67,6 +102,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (type_field != 0 || (subtype != 8 && subtype != 5)) return;
 
     if (subtype == 8) g_stats.beacon_count++;
+
+    /* v2.7.2: ISR 层 MAC 去重，过滤 burst 重复帧 */
+    uint32_t isr_now = (uint32_t)(xTaskGetTickCountFromISR() * portTICK_PERIOD_MS);
+    if (isr_dedup_check(hdr->addr2, isr_now)) {
+        return;
+    }
 
     uint8_t *ie_ptr = pkt->payload + 36;
     uint16_t ie_total_len = actual_len - 36;
@@ -266,20 +307,18 @@ static void channel_hold_task(void *pvParameter) {
                 s_locked_channel = lock_ch;
                 snprintf(msg, sizeof(msg), "Adaptive lock: ch%u (target found)", lock_ch);
                 json_debug("RID_SNIFF", msg);
-                if (!crid_ble_is_connected()) {
-                    crid_ble_scan_stop();
-                }
+                /* v2.7.2: 不直接 stop BLE scan（可能破坏 PTA），
+                 * 切到 WIFI_LOCKED 10% duty 并安全重启。 */
+                crid_ble_scan_set_duty_wifi_locked();
+                crid_ble_delayed_scan_restart(50);
             } else if (s_locked_channel != 0) {
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
-                /* v2.7.1: 未连接时 BLE 扫描保持停止，WiFi 独占空中时间。
-                 * 已连接时恢复 LOW duty 扫描。 */
+                /* 已连接手机：恢复 LOW 40%；未连接保持 WIFI_LOCKED 10%。 */
                 if (crid_ble_is_connected()) {
                     crid_ble_scan_set_duty_low();
-                    crid_ble_scan_stop();
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    crid_ble_scan_start();
+                    crid_ble_delayed_scan_restart(50);
                 }
             }
         }

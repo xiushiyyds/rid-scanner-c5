@@ -285,9 +285,12 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 }
             }
         }
-        /* v2.7.1: 断开后不恢复 BLE RID 扫描，把空中时间全让给 WiFi sniffer。
-         * 只恢复 advertising，等下次手机连接时再启动 LOW duty 扫描。 */
-        crid_ble_scan_stop();
+        /* v2.7.2: 断开后不把 BLE scan 完全停死（完全停止会让部分 ESP32-C5
+         * PTA 共存状态机异常，可能导致 WiFi sniffer 不收包）。
+         * 改为 WIFI_LOCKED 10% duty：BLE 保持活动，GATT/广播可重连，
+         * 同时把 90% 空中时间让给 WiFi sniffer。 */
+        crid_ble_scan_set_duty_wifi_locked();
+        crid_ble_delayed_scan_restart(100);
         ble_advertise_start();
         break;
 
@@ -518,8 +521,7 @@ static void ble_delayed_scan_task(void *arg)
     ESP_LOGI(TAG, "Starting/restarting BLE RID scan (delay=%lu ms, balanced duty)", (unsigned long)delay_ms);
     crid_ble_scan_stop();
     vTaskDelay(pdMS_TO_TICKS(100));
-    /* v2.7.0: 使用 LOW(40%) 而不是 HIGH(原80%)，避免 BLE 扫描抢占 WiFi sniffer 空中时间 */
-    crid_ble_scan_set_duty_low();
+    /* 保持调用方设定的 duty（LOW/WIFI_LOCKED），不要在重启时强制覆盖 */
     crid_ble_scan_start();
     vTaskDelete(NULL);
 }
@@ -582,12 +584,13 @@ ble_on_sync(void)
 
     ble_advertise_start();
 
-    /* v2.7.1: 开机不启动 BLE RID 扫描。
-     * C5 核心任务是 WiFi sniffer 侦测，未连手机时 BLE 扫描纯属浪费射频时间。
-     * 仅保持 BLE advertising（让手机能发现并连接），WiFi sniffer 拿到 100% 空中时间。
-     * 手机连接后在 SUBSCRIBE 事件中以 LOW duty 启动扫描。
-     * 断开后也不自动恢复扫描，等下次连接。 */
-    ESP_LOGI(TAG, "BLE scan disabled at boot (WiFi sniffer priority 100%%)");
+    /* v2.7.2: 开机以 WIFI_LOCKED 10% duty 启动 BLE RID 扫描。
+     * 不能完全停 BLE scan：ESP32-C5 PTA 共存状态机在 scan 完全停止后
+     * 可能出现 WiFi sniffer 不轮转/不收包的问题。
+     * 10% duty（10ms/100ms）几乎不抢 WiFi 空中时间，又能维持 PTA 正常，
+     * 同时保留少量 BLE RID 接收能力。手机 SUBSCRIBE 后升到 40%。 */
+    crid_ble_scan_set_duty_wifi_locked();
+    crid_ble_delayed_scan_restart(800);
 }
 
 /* ================================================================
