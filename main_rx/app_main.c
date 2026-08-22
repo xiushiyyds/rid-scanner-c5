@@ -56,7 +56,7 @@
 #include "evlog.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.7.4"
+#define CRID_VERSION_STRING "2.7.5"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -611,7 +611,7 @@ void app_main(void) {
      * 临时屏蔽 BLE init，USB 网页端功能不受影响。
      * CRID_BLE_DISABLED 宏在 crid_sniffer.c 顶部统一定义。 */
     /* BLE 测试禁用，如需恢复将 crid_sniffer.c 中 CRID_BLE_DISABLED 设为 0 */
-    ESP_LOGW("RID_MAIN", "*** BLE DISABLED for PTA diagnosis test (v2.7.4-noble) ***");
+    ESP_LOGW("RID_MAIN", "*** BLE DISABLED for PTA diagnosis test (v2.7.5-counterfix) ***");
     json_set_data_write_cb(data_write_fanout, NULL);
 
     ESP_LOGI("RID_MAIN", "After BLE init - free heap: %u, internal: %u, largest: %u",
