@@ -18,6 +18,12 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+
+/* v2.7.4-test: 设为 1 完全禁用 BLE，验证 PTA 共存是否是收包率低根因。
+ * 必须在 include crid_ble_scan.h 之前定义。 */
+#ifndef CRID_BLE_DISABLED
+#define CRID_BLE_DISABLED 1
+#endif
 #include "esp_wifi_types.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -325,17 +331,21 @@ static void channel_hold_task(void *pvParameter) {
                 json_debug("RID_SNIFF", msg);
                 /* v2.7.2: 不直接 stop BLE scan（可能破坏 PTA），
                  * 切到 WIFI_LOCKED 10% duty 并安全重启。 */
+#if !CRID_BLE_DISABLED
                 crid_ble_scan_set_duty_wifi_locked();
                 crid_ble_delayed_scan_restart(50);
+#endif
             } else if (s_locked_channel != 0) {
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
                 /* 已连接手机：恢复 LOW 40%；未连接保持 WIFI_LOCKED 10%。 */
+#if !CRID_BLE_DISABLED
                 if (crid_ble_is_connected()) {
                     crid_ble_scan_set_duty_low();
                     crid_ble_delayed_scan_restart(50);
                 }
+#endif
             }
         }
 

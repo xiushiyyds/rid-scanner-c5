@@ -606,17 +606,13 @@ void app_main(void) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     // 6. BLE 初始化（必须在 LCD 之前，抢占连续内部 SRAM）
-    crid_ble_register_pair_display(lcd_display_show_pair_pin);
-
-    ret = crid_ble_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE("RID_MAIN", "BLE init failed: %s", esp_err_to_name(ret));
-        json_warning("RID_MAIN", "BLE init failed (non-fatal)");
-    } else {
-        json_set_data_write_cb(data_write_fanout, NULL);
-        crid_ble_scan_init();
-        ESP_LOGI("RID_MAIN", "BLE ready, data fanout enabled");
-    }
+    /* v2.7.4-test: 完全禁用 BLE 以验证 PTA 共存是否是收包率低的根因。
+     * 肩灯能收到 S3 信号但 C5 收不到，最大嫌疑就是 BLE 抢占空中时间。
+     * 临时屏蔽 BLE init，USB 网页端功能不受影响。
+     * CRID_BLE_DISABLED 宏在 crid_sniffer.c 顶部统一定义。 */
+    /* BLE 测试禁用，如需恢复将 crid_sniffer.c 中 CRID_BLE_DISABLED 设为 0 */
+    ESP_LOGW("RID_MAIN", "*** BLE DISABLED for PTA diagnosis test (v2.7.4-noble) ***");
+    json_set_data_write_cb(data_write_fanout, NULL);
 
     ESP_LOGI("RID_MAIN", "After BLE init - free heap: %u, internal: %u, largest: %u",
              (unsigned)esp_get_free_heap_size(),
