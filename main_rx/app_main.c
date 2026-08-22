@@ -56,7 +56,7 @@
 #include "evlog.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.7.5"
+#define CRID_VERSION_STRING "2.7.6"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -597,24 +597,23 @@ void app_main(void) {
     // 3.5 证据日志
     evlog_init();
 
-    // 5. 释放经典蓝牙内存
-    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    // 5. 完全释放蓝牙控制器+协议栈内存（v2.7.6）
+    // esp_bt_mem_release(BTDM) 内部自动调 esp_bt_controller_mem_release，
+    // 一次性释放 Controller BSS/data + BT/BLE Host 栈内存（约70KB+）。
+    // 纯侦测板不需要 BLE，WiFi 独占 RF/天线，coex 无仲裁对象。
+    // 必须在 esp_bt_controller_init() 之前调用，此时控制器处于 IDLE 状态。
+    esp_bt_mem_release(ESP_BT_MODE_BTDM);
 
-    ESP_LOGI("RID_MAIN", "Before BLE init - free heap: %u, internal: %u, largest: %u",
+    ESP_LOGI("RID_MAIN", "BT memory fully released - free heap: %u, internal: %u, largest: %u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
-    // 6. BLE 初始化（必须在 LCD 之前，抢占连续内部 SRAM）
-    /* v2.7.4-test: 完全禁用 BLE 以验证 PTA 共存是否是收包率低的根因。
-     * 肩灯能收到 S3 信号但 C5 收不到，最大嫌疑就是 BLE 抢占空中时间。
-     * 临时屏蔽 BLE init，USB 网页端功能不受影响。
-     * CRID_BLE_DISABLED 宏在 crid_sniffer.c 顶部统一定义。 */
-    /* BLE 测试禁用，如需恢复将 crid_sniffer.c 中 CRID_BLE_DISABLED 设为 0 */
-    ESP_LOGW("RID_MAIN", "*** BLE DISABLED for PTA diagnosis test (v2.7.5-counterfix) ***");
+    // 6. BLE 已完全禁用（不初始化控制器/host/协议栈）
+    ESP_LOGW("RID_MAIN", "*** BLE DISABLED (v2.7.6, BT controller memory fully released) ***");
     json_set_data_write_cb(data_write_fanout, NULL);
 
-    ESP_LOGI("RID_MAIN", "After BLE init - free heap: %u, internal: %u, largest: %u",
+    ESP_LOGI("RID_MAIN", "After BT release - free heap: %u, internal: %u, largest: %u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
@@ -690,6 +689,6 @@ void app_main(void) {
                         FIXED_CHANNEL, MAX_TRACKED_UAVS,
                         (uint32_t)esp_get_free_heap_size());
 
-    ESP_LOGI("RID_MAIN", "Detector v%s started — WiFi sniffer + BLE WIFI_LOCKED 10%%",
+    ESP_LOGI("RID_MAIN", "Detector v%s started — WiFi sniffer only (BLE fully released)",
              CRID_VERSION_STRING);
 }

@@ -1,6 +1,8 @@
 # SDK 默认配置 for ESP32-C5
 
-# 启用 Bluetooth
+# v2.7.6: 纯 WiFi 侦测板。BT_ENABLED 保持 y（提供 esp_bt_mem_release 符号），
+# 但在 app_main 中调用 esp_bt_mem_release(ESP_BT_MODE_BTDM) 完全释放控制器+协议栈内存，
+# WiFi 独占天线，coex 无仲裁对象。coex 开关关闭。
 CONFIG_BT_ENABLED=y
 
 # NimBLE 配置
@@ -81,8 +83,9 @@ CONFIG_BT_NIMBLE_LL_RESOLV_LIST_SIZE=4
 # LCD 帧缓冲已优先占住 108KB 内部 DMA，其余内部 SRAM 对 NimBLE 足够。
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
 
-# WiFi/BLE 软件共存（ESP32-C5 单天线时分复用，必须开启）
-CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+# v2.7.6: BLE 控制器内存已在 app_main 中完全释放（esp_bt_mem_release BTDM），
+# WiFi 独占天线，不需要软件共存仲裁。关闭 coex 可避免残留 coex 状态影响 RX。
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=n
 
 # 启用 PSRAM
 CONFIG_SPIRAM=y

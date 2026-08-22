@@ -125,39 +125,10 @@ static bool detect_dji_signature(uav_track_t *uav) {
 rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t len) {
     if (!data || len < 1) return RID_PROTOCOL_UNKNOWN;
 
-    /* ============================================================
-     * v2.7.5: 自动对齐 ASTM/ASD-STAN/GB42590/GB46750 的 message_counter。
-     *
-     * 标准 ODID Wi-Fi Beacon Vendor IE 线格式：
-     *   [0xDD][len][FA 0B BC][0x0D][message_counter(1)][MessagePack|TLV]
-     *
-     * 而 sniffer 把 IE payload 起点设在 message_counter 上，
-     * 即传给本函数的 data[0] 是 1 字节 counter，真正的 pack/TLV 头
-     * 在 data[1]。老代码直接把 counter 当作 pack 首字节，
-     * GB42590/ASTM 全部拒绝，只有 counter 偶然为 0x00~0x0F 且
-     * 后续字节误命中时才会解出半残数据（表现为：只收到几个目标、
-     * 坐标全 0、操作员坐标出现 34084864835328 这类天文数字）。
-     *
-     * 这里做无副作用的自动探测：
-     *   - 若 data[0] 已经是 0xF1/0xF2/0xFF（pack 或 GB46750 magic），保持不动；
-     *   - 否则，若 data[1..] 是合法的 pack/TLV 头，则整体偏移 1 字节。
-     * 这样既兼容已经去掉 counter 的数据源（BLE legacy、NAN action），
-     * 也兼容带 counter 的标准 Beacon。
-     * ============================================================ */
-    if (len >= 4) {
-        uint8_t b0 = data[0];
-        uint8_t b1 = data[1];
-        bool b0_is_pack = ((b0 >> 4) == 0x0F) && (b0 & 0x0F) <= 0x02 && data[2] == 25;
-        bool b0_is_gb46750 = (b0 == 0xFF);
-        bool b1_is_pack = ((b1 >> 4) == 0x0F) && (b1 & 0x0F) <= 0x02 && data[2] == 25;
-        /* GB46750 magic 位于 counter 之后时：data[1]==0xFF, data[2] 为版本 */
-        bool b1_is_gb46750 = (b1 == 0xFF);
-
-        if (!b0_is_pack && !b0_is_gb46750 && (b1_is_pack || b1_is_gb46750)) {
-            data += 1;
-            len  -= 1;
-        }
-    }
+    /* sniffer 已经把 odid_payload 指向 0xF1 pack header 或 0xFF GB46750 magic
+     * （从 Vendor IE 的 message_counter 之后开始），无需额外偏移。
+     * v2.7.5 的自动对齐代码经逐行验证为死代码（data[2] 是 msg_count=4 不是 25），
+     * v2.7.6 移除。 */
 
     #if PARSER_DEBUG_HEX_DUMP
     hex_dump(TAG, "Beacon Payload HEX", data, len);

@@ -369,6 +369,11 @@ static void channel_hold_task(void *pvParameter) {
                 snprintf(msg, sizeof(msg), "set channel %d: %s", ch, esp_err_to_name(ret));
                 json_warning("RID_SNIFF", msg);
             }
+            /* v2.7.6: 信道切换后给 RF/PLL 20ms settle time，
+             * 避免切换后立即接收时丢包。参考 S3 发射端在 set_channel 后
+             * 有 500ms 延时。接收端不需要那么长，但 20ms 可显著提高
+             * 新信道前几帧的接收率。 */
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
 
         /* 分段 delay，stop 时能快速退出 */
@@ -469,6 +474,21 @@ esp_err_t crid_sniffer_init(void) {
         snprintf(err, sizeof(err), "Wi-Fi start failed: %s", esp_err_to_name(ret));
         json_error("RID_SNIFF", err);
         return ret;
+    }
+
+    /* v2.7.6: 设置国家码 CN（1-13信道，手动策略）。
+     * S3 发射端设了 CN 国家码，C5 接收端之前没设，可能导致
+     * esp_wifi_set_channel 在某些信道上行为异常或被动扫描限制。
+     * 手动策略确保三个信道都能正常监听。 */
+    wifi_country_t country = {
+        .cc = "CN",
+        .schan = 1,
+        .nchan = 13,
+        .policy = WIFI_COUNTRY_POLICY_MANUAL,
+    };
+    ret = esp_wifi_set_country(&country);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "set_country failed: %s", esp_err_to_name(ret));
     }
 
     esp_wifi_set_promiscuous_rx_cb(wifi_sniffer_cb);
