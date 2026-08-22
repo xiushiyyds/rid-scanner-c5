@@ -78,11 +78,34 @@ bool crid_parser_decode_astm(uav_track_t *uav, const uint8_t *data, uint8_t len)
         return false;
     }
 
+    /* 先走标准整包解码 */
     int ret = odid_message_process_pack(&uav->uas_data, (uint8_t *)data, len);
     if (ret > 0) {
         return true;
     }
 
-    ESP_LOGD(TAG, "odid_message_process_pack failed ret=%d", ret);
+    /* 容错逐条解码：空中信号常有单条 25B 消息被 CRC 错误/部分比特翻转损坏，
+     * 标准 odid_message_process_pack 的 checkPackContent 会因单条失败拒绝
+     * 整包，导致整帧 BasicID/Location 全部丢失、SN 空。
+     * 公安肩灯等专业设备是逐条校验、坏一丢一，好消息照样解析。
+     * 这里退化为逐条 decodeOpenDroneID，能解几条算几条。 */
+    int good = 0;
+    for (uint8_t i = 0; i < msg_count; i++) {
+        const uint8_t *mp = &data[3 + i * ASTM_MSG_SIZE];
+        ODID_messagetype_t mt = decodeOpenDroneID(&uav->uas_data, (uint8_t *)mp);
+        if (mt != ODID_MESSAGETYPE_INVALID) {
+            good++;
+        }
+    }
+    if (good > 0) {
+        static uint32_t s_tolerant = 0;
+        if ((++s_tolerant & 0x1F) == 1) {
+            ESP_LOGW(TAG, "tolerant decode: %d/%d msgs OK (strict failed ret=%d)",
+                     good, msg_count, ret);
+        }
+        return true;
+    }
+
+    ESP_LOGD(TAG, "odid_message_process_pack failed ret=%d, no valid msgs", ret);
     return false;
 }

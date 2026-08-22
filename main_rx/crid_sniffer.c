@@ -237,7 +237,12 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  绝大多数 WiFi RID 设备（DJI/Parrot 等）固定使用 ch6。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 200, 200};
+/* v2.7.3: 三信道更均衡的驻留——S3 模拟器按 i%3 把目标均匀分到 ch1/ch6/ch11，
+ * 之前 1500/200/200 让 ch1 和 ch11 只有 10.5% 监听时间，每 1.9s 周期里
+ * 只有 200ms 能收到该信道的 beacon，大部分目标直接错过。
+ * 调整为 700/600/600（占空比 37%/31.5%/31.5%），周期仍 ~1.9s，
+ * 三信道都能稳定接收。真实 DJI/Parrot 固定 ch6，700ms 仍然最长。 */
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {700, 600, 600};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 static volatile uint8_t s_locked_channel = 0;  /* 0=未锁定，非0=锁定信道 */
@@ -259,6 +264,7 @@ static uint8_t get_best_lock_channel(void) {
 
     uint8_t best_ch = 0;
     uint32_t best_last_seen = 0;
+    uint8_t ch6_target_count = 0;   /* v2.7.3: 统计 ch6 活跃目标数 */
     /* v2.6.5: 统一使用 esp_log_timestamp()，与 last_seen_ms 写入时的时间基准一致。
      * 之前用 xTaskGetTickCount() 导致时间域不匹配，锁定判断失效。 */
     uint32_t now = esp_log_timestamp();
@@ -271,10 +277,9 @@ static uint8_t get_best_lock_channel(void) {
         if (!table[i].active) continue;
         /* 锁定超时 10s */
         if (now - table[i].last_seen_ms >= 10000) continue;
-        /* v2.7.0: 只允许锁定 ch6。绝大多数真实 RID 设备固定 ch6；
-         * 若误锁 ch1/ch11，会让主信道 ch6 完全失去监听。 */
         uint8_t ch = table[i].last_channel & 0x7F;
         if (ch != 6) continue;
+        ch6_target_count++;
         if (table[i].last_seen_ms > best_last_seen) {
             best_last_seen = table[i].last_seen_ms;
             best_ch = ch;
@@ -282,6 +287,12 @@ static uint8_t get_best_lock_channel(void) {
     }
 
     xSemaphoreGive(mutex);
+
+    /* v2.7.3: 只有 ch6 上有 ≥2 个活跃目标才锁定。
+     * 之前任何一个 ch6 单帧就锁死 100% ch6，ch1/ch11 完全失去监听，
+     * 而 S3 模拟器有 2/3 目标在 ch1/ch11，导致只能收到 ch6 的 1/3 目标。
+     * 真实大疆/Parrot 场景下 ch6 往往有多架，锁定仍然有效。 */
+    if (ch6_target_count < 2) return 0;
     return best_ch;
 }
 
@@ -289,7 +300,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.7.1: ch6 1.5s / ch1,ch11 0.2s (ch6 lock only, BLE scan off)");
+             "Channel rotation v2.7.3: ch6 0.7s / ch1,ch11 0.6s (lock ch6 only when >=2 targets)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));

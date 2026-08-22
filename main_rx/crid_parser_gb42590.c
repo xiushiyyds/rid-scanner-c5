@@ -12,7 +12,8 @@
 #include "crid_json.h"
 #include "crid_rx_types.h"
 
-/* 本模块使用 crid_parser_common.c 中的统一 TAG "RID_PARSE" 进行日志输出 */
+/* 本模块使用 "RID_ASTM" 作为日志 TAG（与 crid_parser_astm.c 保持一致） */
+static const char *TAG = "RID_ASTM";
 
 /* ================================================================
  * 常量与宏定义
@@ -67,6 +68,25 @@ static bool decode_gb_format(uav_track_t *uav, const uint8_t *data, uint8_t len)
 
     int ret = odid_message_process_pack(&uav->uas_data, tmp_pack, tmp_pack_size);
     if (ret > 0) {
+        return true;
+    }
+
+    /* 容错逐条解码：标准整包解码可能因单条 25B 消息 CRC/比特错误而整体失败。
+     * 逐条 decodeOpenDroneID，能解几条算几条（与肩灯等专业设备一致）。 */
+    int good = 0;
+    for (uint8_t i = 0; i < gb_msg_count; i++) {
+        const uint8_t *mp = &tmp_pack[3 + i * ASTM_MSG_SIZE];
+        ODID_messagetype_t mt = decodeOpenDroneID(&uav->uas_data, (uint8_t *)mp);
+        if (mt != ODID_MESSAGETYPE_INVALID) {
+            good++;
+        }
+    }
+    if (good > 0) {
+        static uint32_t s_tolerant = 0;
+        if ((++s_tolerant & 0x1F) == 1) {
+            ESP_LOGW("RID_ASTM", "GB42590 tolerant: %d/%d msgs OK (strict failed ret=%d)",
+                     good, gb_msg_count, ret);
+        }
         return true;
     }
     return false;
