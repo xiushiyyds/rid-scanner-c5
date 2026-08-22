@@ -17,7 +17,7 @@
  * ================================================================ */
 #define CRID_VERSION_MAJOR     1
 #define CRID_VERSION_MINOR     9
-#define CRID_VERSION_PATCH     0
+#define CRID_VERSION_PATCH     7
 
 
 /* ================================================================
@@ -276,13 +276,13 @@ typedef struct {
  * ================================================================ */
 
 #define MAX_TRACKED_UAVS        30         // 最多同时追踪的无人机数量
-#define SNIFFER_QUEUE_SIZE      32          // sniffer 消息队列深度
-#define PARSER_TASK_STACK       8192        // 解析任务栈大小
-#define MONITOR_TASK_STACK      4096        // 监控任务栈大小
-#define PARSER_TASK_PRIO        4           // 解析任务优先级
+#define SNIFFER_QUEUE_SIZE      64          /* v2.7.2: 回退64，ISR MAC去重解决burst丢包（128多吃20KB SRAM致WiFi DMA失败） */
+#define PARSER_TASK_STACK       10240       // 解析任务栈大小（v2.6.4: 8192→10240，防止深度调用栈溢出）
+#define MONITOR_TASK_STACK      6144        // 监控任务栈大小（v2.6.4: 4096→6144，json BPRINTF 1KB + write_cb snapshot 1KB）
+#define PARSER_TASK_PRIO        5           // v2.7.1: 4→5，高于BLE host/LCD，burst期间优先解析
 #define MONITOR_TASK_PRIO       3           // 监控任务优先级
-#define CH_HOLD_TASK_STACK      3072        // 信道保持任务栈大小
-#define CH_HOLD_TASK_PRIO       2           // 信道保持任务优先级
+#define CH_HOLD_TASK_STACK      4096        // 信道保持任务栈大小（v2.6.4: 3072→4096，json_debug BPRINTF+write_cb snapshot）
+#define CH_HOLD_TASK_PRIO       2           /* v2.5.9: 回退到v2.3.2的值 */
 
 // 锁定监听信道
 #define FIXED_CHANNEL           6
@@ -373,6 +373,7 @@ typedef struct {
     double            dji_latitude;           // DJI 纬度
     double            dji_longitude;          // DJI 经度
     float             dji_altitude;           // DJI 高度 (m)
+    float             dji_height;             // DJI 相对起飞点高度 (m)
     float             dji_speed_h;            // DJI 水平速度 (m/s)
     float             dji_speed_v;            // DJI 垂直速度 (m/s)
     float             dji_heading;            // DJI 航向 (度)
@@ -384,6 +385,7 @@ typedef struct {
     // 统计
     uint32_t msg_count;                 // 累计消息数
     uint32_t first_seen_ms;             // 首次发现时间
+    uint32_t last_push_ms;              // v2.0.7: 上次推送给手机的时间（节流用）
 
     // 地理围栏告警状态
     uint8_t  alert_level;       // alert_level_t: 0=无告警, 1=超高, 2=禁飞区, 3=机场净空区, 4=管制空域
