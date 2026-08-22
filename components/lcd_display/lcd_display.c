@@ -658,11 +658,20 @@ static void render_home(void)
     if (s_tracker && s_tracker_mutex) {
         xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
         for (int i = 0; i < s_max_uavs; i++) {
-            if (s_tracker[i].active) {
-                active++;
-                if (s_tracker[i].is_dji) dji++;
-                else standard++;
-            }
+            if (!s_tracker[i].active) continue;
+            /* v2.7.4: 与列表页一致的过滤规则，首页计数只算有效目标 */
+            bool has_id = s_tracker[i].basic_id.valid &&
+                          s_tracker[i].basic_id.uas_id[0] != '\0';
+            bool has_loc = s_tracker[i].location.valid &&
+                           (s_tracker[i].location.latitude != 0.0 ||
+                            s_tracker[i].location.longitude != 0.0);
+            bool has_dji = s_tracker[i].is_dji &&
+                           (s_tracker[i].dji_serial[0] || s_tracker[i].dji_model[0]);
+            if (!has_id && !has_loc && !has_dji) continue;
+
+            active++;
+            if (s_tracker[i].is_dji) dji++;
+            else standard++;
         }
         xSemaphoreGive(s_tracker_mutex);
     }
@@ -716,7 +725,21 @@ static void render_list(void)
 
     xSemaphoreTake(s_tracker_mutex, portMAX_DELAY);
     for (int i = 0; i < s_max_uavs && count < 32; i++) {
-        if (s_tracker[i].active) indices[count++] = i;
+        if (!s_tracker[i].active) continue;
+        /* v2.7.4: 过滤"半残"track — 既没有 SN 也没有有效坐标的不显示。
+         * 收包率低时新 MAC 首帧可能只解出 System（操作员位置），
+         * BasicID/Location 因比特翻转丢失，这种 track 没有身份信息
+         * 且会在跨 MAC 合并前短暂占列表，产生"废目标"。 */
+        bool has_id = s_tracker[i].basic_id.valid &&
+                      s_tracker[i].basic_id.uas_id[0] != '\0';
+        bool has_loc = s_tracker[i].location.valid &&
+                       (s_tracker[i].location.latitude != 0.0 ||
+                        s_tracker[i].location.longitude != 0.0);
+        bool has_dji = s_tracker[i].is_dji &&
+                       (s_tracker[i].dji_serial[0] || s_tracker[i].dji_model[0]);
+        if (has_id || has_loc || has_dji) {
+            indices[count++] = i;
+        }
     }
     xSemaphoreGive(s_tracker_mutex);
 
