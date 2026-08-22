@@ -285,9 +285,9 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 }
             }
         }
-        /* v2.1.0: 断开后恢复 HIGH duty 扫描。
-         * 用 delayed_scan_restart 安全重启（不能在 host task 阻塞）。 */
-        crid_ble_delayed_scan_restart(100);
+        /* v2.7.1: 断开后不恢复 BLE RID 扫描，把空中时间全让给 WiFi sniffer。
+         * 只恢复 advertising，等下次手机连接时再启动 LOW duty 扫描。 */
+        crid_ble_scan_stop();
         ble_advertise_start();
         break;
 
@@ -305,6 +305,11 @@ ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                      event->subscribe.attr_handle);
             g_subscribed = true;
             g_paired = true;
+
+            /* v2.7.1: 手机连接后才启动 BLE RID 扫描（LOW duty 40%），
+             * 未连接时 WiFi sniffer 独占 100% 空中时间。 */
+            crid_ble_scan_set_duty_low();
+            crid_ble_delayed_scan_restart(200);
 
             /* v2.1.1: CCCD 写入完成 = 通知通道已就绪，这是发 PAIR_OK
              * 最可靠的时机。不能在 GAP 回调里直接调 write_cb（host task
@@ -577,11 +582,12 @@ ble_on_sync(void)
 
     ble_advertise_start();
 
-    BaseType_t ok = xTaskCreate(ble_delayed_scan_task, "ble_delayed_scan",
-                                2048, (void *)(uintptr_t)800, 4, NULL);
-    if (ok != pdPASS) {
-        crid_ble_scan_start();
-    }
+    /* v2.7.1: 开机不启动 BLE RID 扫描。
+     * C5 核心任务是 WiFi sniffer 侦测，未连手机时 BLE 扫描纯属浪费射频时间。
+     * 仅保持 BLE advertising（让手机能发现并连接），WiFi sniffer 拿到 100% 空中时间。
+     * 手机连接后在 SUBSCRIBE 事件中以 LOW duty 启动扫描。
+     * 断开后也不自动恢复扫描，等下次连接。 */
+    ESP_LOGI(TAG, "BLE scan disabled at boot (WiFi sniffer priority 100%%)");
 }
 
 /* ================================================================

@@ -796,8 +796,10 @@ static void render_list(void)
 
         if (s_tracker[i].is_dji) {
             snprintf(buf, sizeof(buf), "%.0fm", s_tracker[i].dji_altitude);
-        } else if ((int)s_tracker[i].location.height != 0) {
-            snprintf(buf, sizeof(buf), "%dm", (int)s_tracker[i].location.height);
+        } else if (s_tracker[i].location.valid &&
+                   s_tracker[i].location.height > -1000.0f &&
+                   s_tracker[i].location.height < 10000.0f) {
+            snprintf(buf, sizeof(buf), "%.0fm", (double)s_tracker[i].location.height);
         } else {
             snprintf(buf, sizeof(buf), "--m");
         }

@@ -1,11 +1,14 @@
 /**
- * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.0)
+ * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.1)
  *
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
- * v2.7.0: 保留三信道轮巡策略（ch6 主听 + ch1/ch11 快速扫漏），优化：
- *         1) BLE 默认占空比 80%→40%，WiFi 空中时间 20%→60%，帧接收率大幅提升
- *         2) ch6 驻留 1500ms 主听，ch1/ch11 各 200ms 快速扫漏（真实设备基本固定 ch6）
- *         3) 自适应锁定只锁 ch6（ch1/ch11 不锁定，避免丢失 ch6 主目标）
+ * v2.7.1: 接收能力深度优化（对标肩灯策略）：
+ *         1) 开机不启动 BLE RID 扫描，WiFi sniffer 独占 100% 空中时间
+ *         2) 手机连接后才以 LOW 40% duty 启动 BLE 扫描
+ *         3) sniffer 队列 64→128，parser 优先级 4→5，防 burst 丢包
+ *         4) ch6 1500ms 主听，ch1/ch11 各 200ms 快速扫漏
+ *         5) 自适应锁定只锁 ch6，锁定时停止 BLE 扫描
+ * v2.7.0: BLE 占空比 80%→40%，ch6-only 锁定，evlog 降频
  * v2.6.x 历史：自适应信道锁定、ISR 临界区修复、Beacon 采样移除等。
  */
 
@@ -245,7 +248,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.7.0: ch6 1.0s / ch1,ch11 0.5s (ch6 lock only)");
+             "Channel rotation v2.7.1: ch6 1.5s / ch1,ch11 0.2s (ch6 lock only, BLE scan off)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -270,7 +273,9 @@ static void channel_hold_task(void *pvParameter) {
                 snprintf(msg, sizeof(msg), "Adaptive unlock: ch%u (no targets)", s_locked_channel);
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
-                if (!crid_ble_is_connected()) {
+                /* v2.7.1: 未连接时 BLE 扫描保持停止，WiFi 独占空中时间。
+                 * 已连接时恢复 LOW duty 扫描。 */
+                if (crid_ble_is_connected()) {
                     crid_ble_scan_set_duty_low();
                     crid_ble_scan_stop();
                     vTaskDelay(pdMS_TO_TICKS(50));
