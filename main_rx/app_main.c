@@ -56,7 +56,7 @@
 #include "evlog.h"
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.7.7"
+#define CRID_VERSION_STRING "2.7.8-diag"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -323,6 +323,16 @@ static void parser_task(void *pvParameter) {
         }
 
         bool was_new = (uav->msg_count == 0);
+        /* v2.7.8-diagnostic: 每次 track 查找都打印 slot 索引 */
+        {
+            extern uav_track_t *crid_tracker_get_table(void);
+            uav_track_t *tbl = crid_tracker_get_table();
+            int slot_idx = (int)(uav - tbl);
+            ESP_LOGI("RID_TRACK", "pkt: mac=%02X:%02X:%02X:%02X:%02X:%02X slot=%d was_new=%d msg_count=%lu active=%d",
+                     msg.src_mac[0], msg.src_mac[1], msg.src_mac[2],
+                     msg.src_mac[3], msg.src_mac[4], msg.src_mac[5],
+                     slot_idx, was_new, (unsigned long)uav->msg_count, uav->active);
+        }
         uav->msg_count++;
         uav->last_seen_ms = esp_log_timestamp();
         uav->last_rssi = msg.rssi;
@@ -341,6 +351,13 @@ static void parser_task(void *pvParameter) {
         }
 
         crid_parser_extract_layered(uav);
+
+        /* v2.7.8-diagnostic: extract_layered 后打印持久字段状态 */
+        ESP_LOGI("RID_TRACK", "extract: slot proto=%d basic_id.valid=%d SN='%s' loc.valid=%d (%.6f,%.6f) sys.valid=%d op=(%.6f,%.6f)",
+                 uav->protocol, uav->basic_id.valid,
+                 uav->basic_id.valid ? uav->basic_id.uas_id : "(null)",
+                 uav->location.valid, uav->location.latitude, uav->location.longitude,
+                 uav->system.valid, uav->system.operator_latitude, uav->system.operator_longitude);
 
         /* v2.0.5: 每次收到 BasicID 都检查跨 MAC 合并（不再限定 was_new）。
          * 无人机 RID 广播每 1-3 秒随机换 MAC，旧 MAC 的 track 上已有 SN，
@@ -610,7 +627,7 @@ void app_main(void) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
     // 6. BLE 已完全禁用（不初始化控制器/host/协议栈）
-    ESP_LOGW("RID_MAIN", "*** BLE DISABLED (v2.7.7, BT memory fully released, WiFi init before LCD) ***");
+    ESP_LOGW("RID_MAIN", "*** BLE DISABLED (v2.7.8-diag, BT memory fully released, WiFi init before LCD) ***");
     json_set_data_write_cb(data_write_fanout, NULL);
 
     ESP_LOGI("RID_MAIN", "After BT release - free heap: %u, internal: %u, largest: %u",
@@ -692,6 +709,6 @@ void app_main(void) {
                         FIXED_CHANNEL, MAX_TRACKED_UAVS,
                         (uint32_t)esp_get_free_heap_size());
 
-    ESP_LOGI("RID_MAIN", "Detector v%s started — WiFi sniffer only (BT fully released, WiFi before LCD)",
+    ESP_LOGI("RID_MAIN", "Detector v%s started — WiFi sniffer only (BT fully released, diagnostic build)",
              CRID_VERSION_STRING);
 }

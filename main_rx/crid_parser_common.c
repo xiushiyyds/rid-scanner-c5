@@ -161,8 +161,7 @@ rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t
     }
 
     if (proto != RID_PROTOCOL_UNKNOWN) {
-        /* v2.7.4: 诊断日志 — 每帧打印解码了哪些消息，
-         * 用于定位"只收到1个正确目标+2个废目标"问题。 */
+        /* v2.7.8-diagnostic: 前100帧全打印 + hex dump，定位"第一帧对后续全错" */
         static uint32_t s_ok = 0;
         s_ok++;
         uint8_t vmask = 0;
@@ -171,17 +170,25 @@ rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t
         if (uav->uas_data.SystemValid)    vmask |= 0x04;
         if (uav->uas_data.SelfIDValid)    vmask |= 0x08;
         if (uav->uas_data.OperatorIDValid) vmask |= 0x10;
-        /* 前 20 帧全打印，之后每 64 帧打印一次 */
-        if (s_ok <= 20 || (s_ok & 0x3F) == 0) {
-            ESP_LOGI(TAG, "decode ok: proto=%d vmask=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X "
-                     "loc=(%.6f,%.6f) op=(%.6f,%.6f)",
-                     proto, vmask,
+        if (s_ok <= 100 || (s_ok & 0x0F) == 0) {
+            const char *sn = uav->uas_data.BasicIDValid[0] ?
+                (const char *)uav->uas_data.BasicID[0].UASID : "(none)";
+            ESP_LOGI(TAG, "decode ok #%lu: proto=%d vmask=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X "
+                     "SN='%s' loc=(%.6f,%.6f) spd=%.1f dir=%.1f op=(%.6f,%.6f)",
+                     (unsigned long)s_ok, proto, vmask,
                      uav->mac[0], uav->mac[1], uav->mac[2],
                      uav->mac[3], uav->mac[4], uav->mac[5],
+                     sn,
                      uav->uas_data.Location.Latitude,
                      uav->uas_data.Location.Longitude,
+                     uav->uas_data.Location.SpeedHorizontal,
+                     uav->uas_data.Location.Direction,
                      uav->uas_data.System.OperatorLatitude,
                      uav->uas_data.System.OperatorLongitude);
+        }
+        /* 前10帧完整 hex dump payload */
+        if (s_ok <= 10) {
+            ESP_LOG_BUFFER_HEX(TAG "RAW", data, len > 103 ? 103 : len);
         }
         return proto;
     }
