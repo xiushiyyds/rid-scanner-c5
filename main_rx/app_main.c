@@ -325,7 +325,6 @@ static void parser_task(void *pvParameter) {
         bool was_new = (uav->msg_count == 0);
         /* v2.7.8-diagnostic: 每次 track 查找都打印 slot 索引 */
         {
-            extern uav_track_t *crid_tracker_get_table(void);
             uav_track_t *tbl = crid_tracker_get_table();
             int slot_idx = (int)(uav - tbl);
             ESP_LOGI("RID_TRACK", "pkt: mac=%02X:%02X:%02X:%02X:%02X:%02X slot=%d was_new=%d msg_count=%lu active=%d",

@@ -188,7 +188,7 @@ rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t
         }
         /* 前10帧完整 hex dump payload */
         if (s_ok <= 10) {
-            ESP_LOG_BUFFER_HEX(TAG "RAW", data, len > 103 ? 103 : len);
+            ESP_LOG_BUFFER_HEX("RID_PARSE_RAW", data, len > 103 ? 103 : len);
         }
         return proto;
     }
