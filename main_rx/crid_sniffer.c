@@ -37,6 +37,9 @@ static bool s_sniffer_wifi_inited = false;
 /* ---- 模块内部状态 ---- */
 static QueueHandle_t g_sniffer_queue = NULL;
 static sniffer_stats_t g_stats;
+
+/* v2.7.4: 按信道统计 RID 检测数，用于诊断信道轮转效率 */
+static volatile uint32_t g_rid_by_channel[14] = {0};
 int8_t g_rid_min_rssi = RID_MIN_RSSI_DEFAULT;
 static const char *TAG = "WIFI_SNIFFER";
 
@@ -132,6 +135,8 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
                 if (IS_RID_OUI(oui0, oui1, oui2) && oui_type == 0x0D) {
                     has_rid_ie = true;
                     g_stats.rid_detections++;
+                    uint8_t ch_idx = pkt->rx_ctrl.channel & 0x7F;
+                    if (ch_idx < 14) g_rid_by_channel[ch_idx]++;
 
                     if (pkt->rx_ctrl.rssi < g_rid_min_rssi) {
                         break;
@@ -359,6 +364,26 @@ static void channel_hold_task(void *pvParameter) {
         /* 分段 delay，stop 时能快速退出 */
         for (int i = 0; i < (dwell / 50) && !s_hold_should_stop; i++) {
             vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        /* v2.7.4: 每 5 秒打印一次收包统计，用于诊断"只收到几个目标" */
+        {
+            static uint32_t s_last_log = 0;
+            uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            if (now - s_last_log >= 5000) {
+                s_last_log = now;
+                ESP_LOGI(TAG, "stats: total=%lu beacons=%lu rid=%lu dji=%lu "
+                         "qovf=%lu nonrid=%lu | ch1=%lu ch6=%lu ch11=%lu",
+                         (unsigned long)g_stats.total_packets,
+                         (unsigned long)g_stats.beacon_count,
+                         (unsigned long)g_stats.rid_detections,
+                         (unsigned long)g_stats.dji_detections,
+                         (unsigned long)g_stats.queue_overflows,
+                         (unsigned long)g_stats.non_rid_vendor_ie,
+                         (unsigned long)g_rid_by_channel[1],
+                         (unsigned long)g_rid_by_channel[6],
+                         (unsigned long)g_rid_by_channel[11]);
+            }
         }
     }
 

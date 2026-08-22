@@ -16,6 +16,22 @@
 
 static const char *TAG = "PARSER_RID";
 
+/* ================================================================
+ * 坐标有效性校验（v2.7.4）
+ *
+ * 空中干扰/BLE-WiFi共存可能导致单帧中个别字段比特翻转，
+ * decodeLatLon 不检查范围，损坏的 int32 会被直接转成
+ * 34084864835328 这类天文数字 double。这里在提取层兜底：
+ * 纬度必须 [-90, 90]，经度必须 [-180, 180]，超出则丢弃。
+ * ================================================================ */
+static inline bool valid_lat(double v) { return v >= -90.0 && v <= 90.0; }
+static inline bool valid_lon(double v) { return v >= -180.0 && v <= 180.0; }
+static inline bool valid_coord(double lat, double lon) {
+    /* 0,0 也视为无效（RID 设备不会真在几内亚湾） */
+    return valid_lat(lat) && valid_lon(lon) &&
+           !(lat == 0.0 && lon == 0.0);
+}
+
 /*
  * Debug 开关：设为 1 时，在解析前打印原始数据十六进制转储
  * ================================================================ */
@@ -116,25 +132,52 @@ rid_protocol_t crid_parser_decode(uav_track_t *uav, const uint8_t *data, uint8_t
      * 导致 extract_layered 读到上一帧的过期数据。 */
     odid_initUasData(&uav->uas_data);
 
+    rid_protocol_t proto = RID_PROTOCOL_UNKNOWN;
+
     /* --- 第一轮：尝试各协议解析 --- */
 
     // 尝试解析 GB 46750 协议
     if (crid_parser_decode_gb46750(uav, data, len)) {
-        return RID_PROTOCOL_GB46750;
+        proto = RID_PROTOCOL_GB46750;
     }
-
     // 尝试解析 GB 42590 协议
-    if (crid_parser_decode_gb42590(uav, data, len)) {
-        return RID_PROTOCOL_GB42590;
+    else if (crid_parser_decode_gb42590(uav, data, len)) {
+        proto = RID_PROTOCOL_GB42590;
     }
-
     // 尝试解析 ASTM F3411 协议（同时也覆盖 ASD-STAN）
-    if (crid_parser_decode_astm(uav, data, len)) {
+    else if (crid_parser_decode_astm(uav, data, len)) {
         // ASTM 解码成功后，检查是否为 ASD-STAN（欧盟标准）
         if (detect_asd_stan(uav)) {
-            return RID_PROTOCOL_ASD_STAN;
+            proto = RID_PROTOCOL_ASD_STAN;
+        } else {
+            proto = RID_PROTOCOL_ASTM_F3411;
         }
-        return RID_PROTOCOL_ASTM_F3411;
+    }
+
+    if (proto != RID_PROTOCOL_UNKNOWN) {
+        /* v2.7.4: 诊断日志 — 每帧打印解码了哪些消息，
+         * 用于定位"只收到1个正确目标+2个废目标"问题。 */
+        static uint32_t s_ok = 0;
+        s_ok++;
+        uint8_t vmask = 0;
+        if (uav->uas_data.BasicIDValid[0]) vmask |= 0x01;
+        if (uav->uas_data.LocationValid)  vmask |= 0x02;
+        if (uav->uas_data.SystemValid)    vmask |= 0x04;
+        if (uav->uas_data.SelfIDValid)    vmask |= 0x08;
+        if (uav->uas_data.OperatorIDValid) vmask |= 0x10;
+        /* 前 20 帧全打印，之后每 64 帧打印一次 */
+        if (s_ok <= 20 || (s_ok & 0x3F) == 0) {
+            ESP_LOGI(TAG, "decode ok: proto=%d vmask=0x%02X mac=%02X:%02X:%02X:%02X:%02X:%02X "
+                     "loc=(%.6f,%.6f) op=(%.6f,%.6f)",
+                     proto, vmask,
+                     uav->mac[0], uav->mac[1], uav->mac[2],
+                     uav->mac[3], uav->mac[4], uav->mac[5],
+                     uav->uas_data.Location.Latitude,
+                     uav->uas_data.Location.Longitude,
+                     uav->uas_data.System.OperatorLatitude,
+                     uav->uas_data.System.OperatorLongitude);
+        }
+        return proto;
     }
 
     /* --- 第二轮：DJI DroneID 标记检测 --- */
@@ -244,11 +287,27 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         strncpy(uav->basic_id.uas_id, b->UASID, sizeof(uav->basic_id.uas_id) - 1);
         uav->basic_id.uas_id[sizeof(uav->basic_id.uas_id) - 1] = '\0';
     }
-    /* Location — 同上：本包带 Location 才更新，不带则保留最后一次有效坐标 */
+    /* Location — 同上：本包带 Location 才更新，不带则保留最后一次有效坐标。
+     * v2.7.4: 增加坐标范围校验，空中比特翻转产生的天文数字（如纬度
+     * 34084864835328）不覆盖上一帧已确认的有效坐标。 */
     if (uav->uas_data.LocationValid) {
         const ODID_Location_data *l = &uav->uas_data.Location;
-        uav->location.latitude        = l->Latitude;
-        uav->location.longitude       = l->Longitude;
+        double new_lat = l->Latitude;
+        double new_lon = l->Longitude;
+        bool coords_ok = valid_coord(new_lat, new_lon);
+
+        if (coords_ok) {
+            uav->location.latitude        = new_lat;
+            uav->location.longitude       = new_lon;
+            uav->location.valid           = true;
+        } else if (uav->location.valid) {
+            /* 新坐标损坏，保留历史坐标，只更新非位置字段 */
+            static uint32_t s_loc_bad = 0;
+            if ((++s_loc_bad & 0x3F) == 1) {
+                ESP_LOGW(TAG, "Location coord out of range (lat=%.6f lon=%.6f), keeping last valid",
+                         new_lat, new_lon);
+            }
+        }
         uav->location.altitude_baro   = l->AltitudeBaro;
         uav->location.altitude_geo    = l->AltitudeGeo;
         uav->location.height          = l->Height;
@@ -265,13 +324,31 @@ void crid_parser_extract_layered(uav_track_t *uav) {
         uav->location.timestamp = l->TimeStamp;
     }
 
-    /* System Info — 本包带 System 才更新，否则保留历史值 */
+    /* System Info — 本包带 System 才更新，否则保留历史值。
+     * v2.7.4: 操作员坐标同样做范围校验，单帧比特翻转不污染历史值。
+     * 操作员位置类型为 0（Takeoff，无坐标）时不更新坐标字段。 */
     if (uav->uas_data.SystemValid) {
         uav->system.valid = true;
         const ODID_System_data *s = &uav->uas_data.System;
         uav->system.operator_location_type = (uint8_t)s->OperatorLocationType;
-        uav->system.operator_latitude      = s->OperatorLatitude;
-        uav->system.operator_longitude     = s->OperatorLongitude;
+
+        double new_olat = s->OperatorLatitude;
+        double new_olon = s->OperatorLongitude;
+        bool op_coords_ok = valid_coord(new_olat, new_olon);
+
+        if (op_coords_ok) {
+            uav->system.operator_latitude  = new_olat;
+            uav->system.operator_longitude = new_olon;
+        } else if (uav->system.operator_latitude != 0.0 ||
+                   uav->system.operator_longitude != 0.0) {
+            /* 保留已有的有效操作员坐标 */
+            static uint32_t s_op_bad = 0;
+            if ((++s_op_bad & 0x3F) == 1) {
+                ESP_LOGW(TAG, "Operator coord out of range (lat=%.6f lon=%.6f), keeping last valid",
+                         new_olat, new_olon);
+            }
+        }
+
         uav->system.operator_altitude_geo  = s->OperatorAltitudeGeo;
         uav->system.area_count             = s->AreaCount;
         uav->system.area_radius            = s->AreaRadius;
