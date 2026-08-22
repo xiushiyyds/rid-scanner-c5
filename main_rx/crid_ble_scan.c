@@ -377,7 +377,7 @@ void crid_ble_scan_set_allowed(bool allowed) {
 void crid_ble_scan_set_duty_high(void) {
     if (s_scan_duty == SCAN_DUTY_HIGH) return;
     s_scan_duty = SCAN_DUTY_HIGH;
-    ESP_LOGI(TAG, "Scan duty -> HIGH (80% window=80ms/itvl=100ms)");
+    ESP_LOGI(TAG, "Scan duty -> HIGH/BALANCED (40% window=40ms/itvl=100ms)");
 }
 
 void crid_ble_scan_set_duty_low(void) {

@@ -2,9 +2,9 @@
  * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.0)
  *
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
- * v2.7.0: 保留三信道轮巡策略（ch6 主听 + ch1/ch11 扫漏），优化：
+ * v2.7.0: 保留三信道轮巡策略（ch6 主听 + ch1/ch11 快速扫漏），优化：
  *         1) BLE 默认占空比 80%→40%，WiFi 空中时间 20%→60%，帧接收率大幅提升
- *         2) ch1/ch11 驻留 250ms→500ms，更好覆盖非 ch6 设备
+ *         2) ch6 驻留 1500ms 主听，ch1/ch11 各 200ms 快速扫漏（真实设备基本固定 ch6）
  *         3) 自适应锁定只锁 ch6（ch1/ch11 不锁定，避免丢失 ch6 主目标）
  * v2.6.x 历史：自适应信道锁定、ISR 临界区修复、Beacon 采样移除等。
  */
@@ -185,15 +185,15 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 /* ================================================================
  信道轮转（v2.6.1 自适应信道锁定 + BLE 占空比联动）
 
- 无目标时：ch6 1500ms / ch1 250ms / ch11 250ms，周期 2.0s。
- 发现目标后：锁定目标所在信道持续监听，同时 BLE 占空比从 80% 降到 10%，
+ 无目标时：ch6 1500ms / ch1 200ms / ch11 200ms，周期 1.9s。
+ 发现目标后：锁定 ch6 持续监听，同时 BLE 占空比从 40% 降到 10%，
             把 90% 空中时间让给 WiFi sniffer，显著提高包接收率和 RSSI 刷新率。
- 目标全部超时消失后：恢复轮巡 + BLE 80% 占空比。
+ 目标全部超时消失后：恢复轮巡 + BLE 40% 占空比。
 
  绝大多数 WiFi RID 设备（DJI/Parrot 等）固定使用 ch6。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 500, 500};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 200, 200};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 static volatile uint8_t s_locked_channel = 0;  /* 0=未锁定，非0=锁定信道 */
