@@ -54,7 +54,7 @@ static volatile bool s_scan_allowed = true;
 
 /* ---- 扫描占空比模式 ---- */
 typedef enum {
-    SCAN_DUTY_HIGH,          /* 空闲：80%，高 BLE RID 捕获率 */
+    SCAN_DUTY_HIGH,          /* v2.7.0: 40%，BLE RID 与 WiFi sniffer 平衡 */
     SCAN_DUTY_LOW,           /* 已连接：40%，GATT 连接事件稳定 */
     SCAN_DUTY_WIFI_LOCKED,   /* WiFi 目标锁定：10%，把空中时间让给 WiFi sniffer */
 } scan_duty_t;
@@ -227,18 +227,20 @@ static int ble_scan_gap_event(struct ble_gap_event *event, void *arg) {
  *
  * v2.1.0: 扫描参数根据 s_scan_duty 动态设置。
  *   HIGH: itvl=160(100ms), window=128(80ms) = 80% 占空比
+ * v2.7.0: BLE 空闲占空比从 80% 降到 40%。实测未连接手机时 BLE 扫描抢占
+ *         过多 WiFi 空中时间，导致国标 RID Beacon 接收率极低；40% 在保留
+ *         BLE RID 扫描能力的同时，把 WiFi 接收时间提升约 3 倍。
  * 占空比：
- *   HIGH（空闲/未连接）：80%，window=80ms / itvl=100ms
+ *   HIGH（空闲/未连接）：40%，window=40ms / itvl=100ms
  *   LOW （已连接）：     40%，window=40ms / itvl=100ms
- *   WIFI_LOCKED（WiFi目标锁定）：10%，window=10ms / itvl=100ms，
- *                                让 WiFi sniffer 获得 90% 空中时间
+ *   WIFI_LOCKED（WiFi目标锁定）：10%，window=10ms / itvl=100ms
  *
  * window < itvl 确保控制器在扫描间隙有时间处理 GATT 连接事件。
  * 这是 BLE 协议标准设计，与肩灯/手机同时扫描+连接的原理相同。
  * ================================================================ */
 static const char *duty_name(scan_duty_t d) {
     switch (d) {
-    case SCAN_DUTY_HIGH:        return "HIGH 80%";
+    case SCAN_DUTY_HIGH:        return "BALANCED 40%";
     case SCAN_DUTY_LOW:         return "LOW 40%";
     case SCAN_DUTY_WIFI_LOCKED: return "WIFI_LOCKED 10%";
     }
@@ -247,7 +249,7 @@ static const char *duty_name(scan_duty_t d) {
 
 static uint16_t duty_window(scan_duty_t d) {
     switch (d) {
-    case SCAN_DUTY_HIGH:        return 128;  /* 80ms  */
+    case SCAN_DUTY_HIGH:        return 64;   /* 40ms, v2.7.0: 80ms -> 40ms */
     case SCAN_DUTY_LOW:         return 64;   /* 40ms  */
     case SCAN_DUTY_WIFI_LOCKED: return 16;   /* 10ms  */
     }

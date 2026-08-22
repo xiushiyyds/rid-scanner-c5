@@ -62,7 +62,7 @@
 #endif
 
 #ifndef CRID_VERSION_STRING
-#define CRID_VERSION_STRING "2.6.8"
+#define CRID_VERSION_STRING "2.7.0"
 #endif
 #ifndef CRID_BUILD_DATE
 #define CRID_BUILD_DATE     __DATE__
@@ -281,7 +281,7 @@ static void parser_task(void *pvParameter) {
             /* v2.6.4: 证据留存条件在 mutex 内判断，但 evlog_write 移到 mutex 外。
              * evlog_write 内部可能执行 esp_partition_erase_range（扇区擦除 30-50ms），
              * 持锁期间会阻塞 LCD 刷新和 parser 的其他迭代。 */
-            bool need_evlog = (was_new || uav->msg_count % 10 == 0) &&
+            bool need_evlog = (was_new || uav->msg_count % 50 == 0) &&
                               (uav->dji_serial[0] || uav->location.valid);
 
             xSemaphoreGive(mutex);
@@ -421,7 +421,7 @@ static void parser_task(void *pvParameter) {
         }
 
         /* v2.6.4: 证据留存条件在 mutex 内判断，evlog_write 移到 mutex 外 */
-        bool need_evlog = (was_new || uav->msg_count % 10 == 0) &&
+        bool need_evlog = (was_new || uav->msg_count % 50 == 0) &&
                           (uav->basic_id.valid || uav->location.valid);
 
         xSemaphoreGive(mutex);

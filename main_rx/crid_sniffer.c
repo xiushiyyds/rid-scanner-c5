@@ -1,17 +1,12 @@
 /**
- * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.1.0)
+ * crid_sniffer.c — Wi-Fi Sniffer 模块 (detector v2.7.0)
  *
  * 纯侦测板：WiFi sniffer 持续运行，与 BLE 扫描通过 PTA 硬件共存。
- * v2.1.0: 删除 TDD 时分复用，WiFi 不再被应用层打断。
- * WiFi buffer 大幅削减以节省内部 SRAM。
- * 信道轮转：ch6 1500ms, ch1/ch11 各 250ms（v2.6.1 恢复 v2.3.2 时序）。
- * v2.6.1: 锁定 WiFi 目标时 BLE 占空比切到 10%，给 WiFi sniffer 让空中时间。
- * v2.6.2: 锁定时完全停止 BLE 扫描（100% WiFi 空中时间）；修复重复 set_channel
- *         导致的周期性丢包；修复 get_best_lock_channel 未检查 active 标志。
- * v2.6.3: 锁定超时 30s→10s（目标消失后更快恢复扫描）；移除无用 Beacon 采样和
- *         SSID 字段（省 ~2KB 内部 SRAM + ISR 时间）。
- * v2.6.4: ISR 临界区稳定性修复——移除 Beacon 采样减少 ISR 负载；
- *         移除 SSID IE 解析（不再使用）。
+ * v2.7.0: 保留三信道轮巡策略（ch6 主听 + ch1/ch11 扫漏），优化：
+ *         1) BLE 默认占空比 80%→40%，WiFi 空中时间 20%→60%，帧接收率大幅提升
+ *         2) ch1/ch11 驻留 250ms→500ms，更好覆盖非 ch6 设备
+ *         3) 自适应锁定只锁 ch6（ch1/ch11 不锁定，避免丢失 ch6 主目标）
+ * v2.6.x 历史：自适应信道锁定、ISR 临界区修复、Beacon 采样移除等。
  */
 
 #include <string.h>
@@ -198,7 +193,7 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
  绝大多数 WiFi RID 设备（DJI/Parrot 等）固定使用 ch6。
  ================================================================ */
 static const uint8_t SCAN_CHANNELS[] = {6, 1, 11};
-static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1500, 250, 250};
+static const uint16_t CHANNEL_DWELL_MS_ARR[] = {1000, 500, 500};
 #define SCAN_CHANNEL_COUNT (sizeof(SCAN_CHANNELS) / sizeof(SCAN_CHANNELS[0]))
 static volatile uint8_t s_current_channel = 6;
 static volatile uint8_t s_locked_channel = 0;  /* 0=未锁定，非0=锁定信道 */
@@ -232,9 +227,10 @@ static uint8_t get_best_lock_channel(void) {
         if (!table[i].active) continue;
         /* 锁定超时 10s */
         if (now - table[i].last_seen_ms >= 10000) continue;
-        /* 只锁定 WiFi 目标（channel != 0） */
+        /* v2.7.0: 只允许锁定 ch6。绝大多数真实 RID 设备固定 ch6；
+         * 若误锁 ch1/ch11，会让主信道 ch6 完全失去监听。 */
         uint8_t ch = table[i].last_channel & 0x7F;
-        if (ch == 0) continue;
+        if (ch != 6) continue;
         if (table[i].last_seen_ms > best_last_seen) {
             best_last_seen = table[i].last_seen_ms;
             best_ch = ch;
@@ -249,7 +245,7 @@ static void channel_hold_task(void *pvParameter) {
     (void)pvParameter;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "Channel rotation v2.6.7: ch6 1.5s / ch1,ch11 250ms (adaptive lock)");
+             "Channel rotation v2.7.0: ch6 1.0s / ch1,ch11 0.5s (ch6 lock only)");
     json_debug("RID_SNIFF", msg);
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -275,7 +271,7 @@ static void channel_hold_task(void *pvParameter) {
                 json_debug("RID_SNIFF", msg);
                 s_locked_channel = 0;
                 if (!crid_ble_is_connected()) {
-                    crid_ble_scan_set_duty_high();
+                    crid_ble_scan_set_duty_low();
                     crid_ble_scan_stop();
                     vTaskDelay(pdMS_TO_TICKS(50));
                     crid_ble_scan_start();

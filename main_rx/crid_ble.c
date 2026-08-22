@@ -510,10 +510,11 @@ static void ble_delayed_scan_task(void *arg)
 {
     uint32_t delay_ms = (uint32_t)(intptr_t)arg;
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    ESP_LOGI(TAG, "Starting/restarting BLE RID scan (delay=%lu ms)", (unsigned long)delay_ms);
+    ESP_LOGI(TAG, "Starting/restarting BLE RID scan (delay=%lu ms, balanced duty)", (unsigned long)delay_ms);
     crid_ble_scan_stop();
     vTaskDelay(pdMS_TO_TICKS(100));
-    crid_ble_scan_set_duty_high();
+    /* v2.7.0: 使用 LOW(40%) 而不是 HIGH(原80%)，避免 BLE 扫描抢占 WiFi sniffer 空中时间 */
+    crid_ble_scan_set_duty_low();
     crid_ble_scan_start();
     vTaskDelete(NULL);
 }
